@@ -7,6 +7,9 @@ connection for is factored into the pure `format_*` functions below,
 which the suite does cover."""
 import argparse
 import asyncio
+import json
+import shlex
+import sys
 from pathlib import Path
 
 import discord
@@ -17,6 +20,7 @@ from archiver.db import connect_catalog
 from archiver.discovery import discover_guild
 from archiver.discord_io import load_token
 from archiver.live import apply_live_message, apply_raw_delete, apply_raw_edit, catch_up_missed_messages, rescan_recent_window
+from archiver.search import format_result, get_context, search
 from archiver.store import ShardStore
 
 HERE = Path(__file__).parent.parent
@@ -248,13 +252,81 @@ async def _run_live(config) -> int:
     return 0
 
 
+def _run_find(config, raw_query: str, *, full: bool = False, context: int = 0,
+              json_output: bool = False) -> int:
+    catalog_conn = connect_catalog(config.data_dir / "catalog.sqlite")
+    try:
+        try:
+            results = search(catalog_conn, config.data_dir, raw_query)
+        except ValueError as e:
+            print(f"invalid query: {e}")
+            return 1
+
+        if len(results) == 500:
+            print("(showing first 500 results — narrow your search with a channel, date, "
+                  "or author filter for more)", file=sys.stderr)
+
+        id_index_cache: dict = {}
+
+        if json_output:
+            payload = []
+            for row in results:
+                entry = dict(row)
+                if context:
+                    before, after = get_context(catalog_conn, config.data_dir,
+                                                 row["channel_id"], row["id"], context,
+                                                 id_index_cache=id_index_cache)
+                    entry["context_before"] = before
+                    entry["context_after"] = after
+                payload.append(entry)
+            print(json.dumps(payload, ensure_ascii=False, indent=2, default=str))
+            return 0
+
+        if not results:
+            print("No results.")
+            return 0
+        for row in results:
+            print(format_result(catalog_conn, row, full=full))
+            if context:
+                before, after = get_context(catalog_conn, config.data_dir,
+                                             row["channel_id"], row["id"], context,
+                                             id_index_cache=id_index_cache)
+                for b in before:
+                    print(f"    {format_result(catalog_conn, b, full=full)}")
+                print("    --- match ---")
+                for a in after:
+                    print(f"    {format_result(catalog_conn, a, full=full)}")
+        return 0
+    finally:
+        catalog_conn.close()
+
+
+def _run_find_interactive(config) -> int:
+    print("Interactive search. Enter a query, or leave blank / Ctrl-D to exit.")
+    while True:
+        try:
+            raw = input("search> ")
+        except EOFError:
+            print()
+            return 0
+        if not raw.strip():
+            return 0
+        _run_find(config, raw)
+
+
 def main() -> int:
+    sys.stdout.reconfigure(encoding="utf-8")
     parser = argparse.ArgumentParser(prog="archive")
     subparsers = parser.add_subparsers(dest="command", required=True)
     subparsers.add_parser("backfill")
     subparsers.add_parser("doctor")
     coverage_parser = subparsers.add_parser("coverage")
     coverage_parser.add_argument("--preflight", action="store_true")
+    find_parser = subparsers.add_parser("find")
+    find_parser.add_argument("query", nargs="*")
+    find_parser.add_argument("--full", action="store_true")
+    find_parser.add_argument("--context", type=int, default=0)
+    find_parser.add_argument("--json", action="store_true", dest="json_output")
     subparsers.add_parser("live")
 
     args = parser.parse_args()
@@ -270,6 +342,12 @@ def main() -> int:
         return asyncio.run(_run_doctor(config))
     if args.command == "coverage":
         return asyncio.run(_run_coverage_preflight(config))
+    if args.command == "find":
+        if not args.query:
+            return _run_find_interactive(config)
+        raw_query = shlex.join(args.query)
+        return _run_find(config, raw_query, full=args.full, context=args.context,
+                         json_output=args.json_output)
     if args.command == "live":
         return asyncio.run(_run_live(config))
     parser.error(f"unknown command: {args.command}")
