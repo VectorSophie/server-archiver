@@ -9,6 +9,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from archiver.db import connect_shard
+from archiver.fts import ensure_messages_fts
 
 SEOUL = ZoneInfo("Asia/Seoul")
 UNCATEGORIZED_ID = "uncategorized"
@@ -42,9 +43,8 @@ class ShardStore:
         if row is not None:
             relative_path = row["shard_path"]
         else:
-            category_id, category_name = self._resolve_category(channel_id)
-            folder = sanitize_folder_name(category_name)
-            relative_path = f"{folder}/{yyyymm}.sqlite"
+            relative_path = self._resolve_new_path(channel_id, yyyymm)
+            category_id, _ = self._resolve_category(channel_id)
             self.catalog_conn.execute(
                 "INSERT INTO channel_month_shard (channel_id, yyyymm, category_id, shard_path) "
                 "VALUES (?, ?, ?, ?)",
@@ -53,8 +53,37 @@ class ShardStore:
             self.catalog_conn.commit()
 
         if relative_path not in self._shards:
-            self._shards[relative_path] = connect_shard(self.data_dir / relative_path)
+            conn = connect_shard(self.data_dir / relative_path)
+            ensure_messages_fts(conn)  # no-op if trigram FTS5 isn't available (spec §7.1)
+            self._shards[relative_path] = conn
         return self._shards[relative_path]
+
+    def _resolve_new_path(self, channel_id: str, yyyymm: str) -> str:
+        """One shard file per channel per month, grouped under its
+        category folder. Channel folder names get a short id suffix
+        only when another channel in the same category shares the same
+        sanitized name (a real case on this server: duplicate channel
+        names across different categories/ids) -- collision-checked
+        once at first resolution, not on every write."""
+        category_id, category_name = self._resolve_category(channel_id)
+        category_folder = sanitize_folder_name(category_name)
+
+        chan_row = self.catalog_conn.execute(
+            "SELECT name, category_id FROM channels WHERE id=?", (channel_id,)
+        ).fetchone()
+        channel_name = chan_row["name"] if chan_row else channel_id
+        raw_category_id = chan_row["category_id"] if chan_row else None
+        channel_folder = sanitize_folder_name(channel_name)
+
+        collision = self.catalog_conn.execute(
+            "SELECT 1 FROM channels WHERE id != ? AND LOWER(name) = LOWER(?) "
+            "AND category_id IS ? LIMIT 1",
+            (channel_id, channel_name, raw_category_id),
+        ).fetchone()
+        if collision is not None:
+            channel_folder = f"{channel_folder}-{channel_id[-6:]}"
+
+        return f"{category_folder}/{channel_folder}/{yyyymm}.sqlite"
 
     def _resolve_category(self, channel_id: str) -> tuple[str, str]:
         row = self.catalog_conn.execute(

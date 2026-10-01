@@ -16,6 +16,7 @@ from archiver.config import load_config
 from archiver.db import connect_catalog
 from archiver.discovery import discover_guild
 from archiver.discord_io import load_token
+from archiver.live import apply_live_message, apply_raw_delete, apply_raw_edit, catch_up_missed_messages, rescan_recent_window
 from archiver.store import ShardStore
 
 HERE = Path(__file__).parent.parent
@@ -188,6 +189,65 @@ async def _run_backfill(config) -> int:
     return 0
 
 
+async def _run_live(config) -> int:
+    catalog_conn = connect_catalog(config.data_dir / "catalog.sqlite")
+    store = ShardStore(config.data_dir, catalog_conn)
+    intents = discord.Intents.default()
+    intents.message_content = True
+    client = discord.Client(intents=intents)
+    caught_up_channels: set[str] = set()
+    backfill_task: asyncio.Task | None = None
+
+    @client.event
+    async def on_ready():
+        nonlocal backfill_task
+        guild = client.get_guild(int(config.guild_id))
+        if guild is None:
+            print(f"live capture failed: configured guild id {config.guild_id} not found")
+            await client.close()
+            return
+        try:
+            await discover_guild(guild, catalog_conn)
+            await catch_up_missed_messages(client, catalog_conn, store, caught_up_channels)
+            await rescan_recent_window(client, catalog_conn, store)
+            if backfill_task is None or backfill_task.done():
+                backfill_task = asyncio.create_task(backfill_all_pending(client, catalog_conn, store))
+            print(f"Live capture running as {client.user}.")
+        except Exception as e:
+            print(f"live capture startup sequence failed: {e}. "
+                  f"Live message capture continues, but discovery/catch-up/backfill may be incomplete.")
+
+    @client.event
+    async def on_message(message):
+        channel_id = str(message.channel.id)
+        row = catalog_conn.execute(
+            "SELECT status FROM coverage WHERE channel_id=?", (channel_id,)
+        ).fetchone()
+        advance = row is None or row["status"] != "complete" or channel_id in caught_up_channels
+        apply_live_message(store, catalog_conn, message, advance_checkpoint=advance)
+
+    @client.event
+    async def on_raw_message_edit(payload):
+        apply_raw_edit(store, catalog_conn, str(payload.channel_id), payload.data)
+
+    @client.event
+    async def on_raw_message_delete(payload):
+        apply_raw_delete(store, catalog_conn, str(payload.channel_id), payload.message_id)
+
+    @client.event
+    async def on_raw_bulk_message_delete(payload):
+        for message_id in payload.message_ids:
+            apply_raw_delete(store, catalog_conn, str(payload.channel_id), message_id)
+
+    token = load_token(HERE / ".env")
+    try:
+        await client.start(token)  # runs until externally stopped
+    except Exception as e:
+        print(f"live capture failed to connect: {e}")
+        return 1
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(prog="archive")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -195,6 +255,7 @@ def main() -> int:
     subparsers.add_parser("doctor")
     coverage_parser = subparsers.add_parser("coverage")
     coverage_parser.add_argument("--preflight", action="store_true")
+    subparsers.add_parser("live")
 
     args = parser.parse_args()
 
@@ -209,6 +270,8 @@ def main() -> int:
         return asyncio.run(_run_doctor(config))
     if args.command == "coverage":
         return asyncio.run(_run_coverage_preflight(config))
+    if args.command == "live":
+        return asyncio.run(_run_live(config))
     parser.error(f"unknown command: {args.command}")
     return 2
 

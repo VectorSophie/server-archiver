@@ -60,15 +60,22 @@ launch attempt fails the lock acquisition immediately and exits with a clear log
   they never move existing data).
 - `users`, `user_nicknames` — append-only, only nicknames actually observed; no
   historical names invented for periods before observation started.
-- `channel_month_shard` — (channel_id, yyyymm) → shard file. A channel that later
-  moves Discord category keeps its already-written months in their original shard;
-  only new writes go to the new category's shard. No migration, no duplication.
+- `channel_month_shard` — (channel_id, yyyymm) → shard file. One shard file per
+  *channel* per month, grouped under its category folder (corrected 2026-09-30: an
+  earlier draft shared one file per *category* per month across all its channels,
+  which meant every channel in a busy category serialized on the same connection —
+  switched to per-channel files while migrating the real archive, before enough data
+  existed to make that costly). A channel that later moves Discord category, or is
+  renamed, keeps its already-written months in their original shard; only new writes
+  go to the new location. No migration, no duplication. A channel name colliding with
+  another channel's name in the same category gets a short id suffix, checked once at
+  first resolution.
 - `coverage` — per channel/thread: status (`pending`/`crawling`/`complete`/
   `inaccessible`/`failed`), oldest/newest archived message, message count, backfill
   checkpoint, live checkpoint, last_checked_utc, gap_reason.
 - `snapshots` — tarball path, sha256, row count, created_utc, partial flag.
 
-Per category, per month (`<Category>\<YYYY-MM>.sqlite`):
+Per channel, per month (`<Category>\<Channel>\<YYYY-MM>.sqlite`):
 `messages`, `attachments` (metadata only: filename, content_type, size, width, height,
 duration, description), `reactions` (message_id, emoji, is_custom, animated, count —
 aggregate only; per-reactor lists need one extra API call per emoji per message and are

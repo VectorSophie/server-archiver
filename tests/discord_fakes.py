@@ -197,7 +197,12 @@ class FakeHistoryChannel:
             raise discord.Forbidden(FakeResponse(), "Missing Permissions")
         if self._http_error:
             raise discord.HTTPException(FakeResponse(), "Internal Server Error")
-        after_id = after.id if after is not None else 0
+        # Accept either a discord.Object-like value with .id or a plain datetime.
+        # For datetime (or any non-.id value), treat as "no lower bound".
+        if hasattr(after, "id"):
+            after_id = after.id
+        else:
+            after_id = 0
         remaining = [m for m in self._messages if m.id > after_id]
         for m in remaining[:limit]:
             yield m

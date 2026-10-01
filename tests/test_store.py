@@ -46,13 +46,97 @@ def test_shard_store_resolves_category_folder(tmp_path: Path):
 
     row = shard_conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='messages'").fetchone()
     assert row is not None
-    assert (tmp_path / "Friends" / "2025-10.sqlite").exists()
+    assert (tmp_path / "Friends" / "general" / "2025-10.sqlite").exists()
 
     catalog_row = catalog.execute(
         "SELECT shard_path, category_id FROM channel_month_shard WHERE channel_id='1' AND yyyymm='2025-10'"
     ).fetchone()
-    assert catalog_row["shard_path"] == "Friends/2025-10.sqlite"
+    assert catalog_row["shard_path"] == "Friends/general/2025-10.sqlite"
     assert catalog_row["category_id"] == "10"
+
+
+def test_shard_store_disambiguates_duplicate_channel_names_in_same_category(tmp_path: Path):
+    """Real case on the target server: two channels share the same
+    display name under the same category. Each must get its own file."""
+    catalog = connect_catalog(tmp_path / "catalog.sqlite")
+    for cid in ("1", "2"):
+        catalog.execute(
+            "INSERT INTO channels (id, name, type, parent_id, category_id, is_archived, "
+            "first_seen_utc, last_seen_utc) VALUES "
+            f"('{cid}','hong-sang','text','10','10',0,'2025-10-15T00:00:00Z','2025-10-15T00:00:00Z')"
+        )
+    catalog.execute(
+        "INSERT INTO category_names (category_id, name, updated_utc) VALUES "
+        "('10','Friends','2025-10-15T00:00:00Z')"
+    )
+    catalog.commit()
+    store = ShardStore(tmp_path, catalog)
+
+    store.get_shard("1", SEOUL_MIDNIGHT_UTC)
+    store.get_shard("2", SEOUL_MIDNIGHT_UTC)
+
+    path1 = catalog.execute(
+        "SELECT shard_path FROM channel_month_shard WHERE channel_id='1'"
+    ).fetchone()["shard_path"]
+    path2 = catalog.execute(
+        "SELECT shard_path FROM channel_month_shard WHERE channel_id='2'"
+    ).fetchone()["shard_path"]
+    assert path1 != path2
+    assert "hong-sang" in path1 and "hong-sang" in path2
+
+
+def test_shard_store_wires_up_fts_on_every_new_shard(tmp_path: Path):
+    """Regression: ensure_messages_fts (Stage 1) was never actually
+    called anywhere in production code -- every shard created before
+    this fix has no messages_fts table, silently breaking Stage 5
+    search before it's even built."""
+    catalog = connect_catalog(tmp_path / "catalog.sqlite")
+    catalog.execute(
+        "INSERT INTO channels (id, name, type, parent_id, category_id, is_archived, "
+        "first_seen_utc, last_seen_utc) VALUES "
+        "('1','general','text','10','10',0,'2025-10-15T00:00:00Z','2025-10-15T00:00:00Z')"
+    )
+    catalog.execute(
+        "INSERT INTO category_names (category_id, name, updated_utc) VALUES "
+        "('10','Friends','2025-10-15T00:00:00Z')"
+    )
+    catalog.commit()
+    store = ShardStore(tmp_path, catalog)
+
+    shard_conn = store.get_shard("1", SEOUL_MIDNIGHT_UTC)
+
+    from archiver.fts import detect_trigram_support
+    if not detect_trigram_support(shard_conn):
+        import pytest
+        pytest.skip("trigram FTS5 tokenizer not available in this SQLite build")
+    tables = {
+        row[0] for row in shard_conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        )
+    }
+    assert "messages_fts" in tables
+
+
+def test_shard_store_does_not_disambiguate_unique_names(tmp_path: Path):
+    catalog = connect_catalog(tmp_path / "catalog.sqlite")
+    catalog.execute(
+        "INSERT INTO channels (id, name, type, parent_id, category_id, is_archived, "
+        "first_seen_utc, last_seen_utc) VALUES "
+        "('1','general','text','10','10',0,'2025-10-15T00:00:00Z','2025-10-15T00:00:00Z')"
+    )
+    catalog.execute(
+        "INSERT INTO category_names (category_id, name, updated_utc) VALUES "
+        "('10','Friends','2025-10-15T00:00:00Z')"
+    )
+    catalog.commit()
+    store = ShardStore(tmp_path, catalog)
+
+    store.get_shard("1", SEOUL_MIDNIGHT_UTC)
+
+    path = catalog.execute(
+        "SELECT shard_path FROM channel_month_shard WHERE channel_id='1'"
+    ).fetchone()["shard_path"]
+    assert path == "Friends/general/2025-10.sqlite"
 
 
 def test_shard_store_uses_uncategorized_sentinel_for_channel_with_no_category(tmp_path: Path):
@@ -67,7 +151,7 @@ def test_shard_store_uses_uncategorized_sentinel_for_channel_with_no_category(tm
     store = ShardStore(tmp_path, catalog)
     store.get_shard("2", SEOUL_MIDNIGHT_UTC)
 
-    assert (tmp_path / "Uncategorized" / "2025-10.sqlite").exists()
+    assert (tmp_path / "Uncategorized" / "loose-channel" / "2025-10.sqlite").exists()
     catalog_row = catalog.execute(
         "SELECT category_id FROM channel_month_shard WHERE channel_id='2'"
     ).fetchone()
@@ -116,8 +200,8 @@ def test_shard_store_keeps_old_months_path_after_category_rename(tmp_path: Path)
     store2 = ShardStore(tmp_path, catalog)
     store2.get_shard("1", SEOUL_MIDNIGHT_UTC)  # same channel, same month, after rename
 
-    assert (tmp_path / "Friends" / "2025-10.sqlite").exists()
-    assert not (tmp_path / "Renamed" / "2025-10.sqlite").exists()
+    assert (tmp_path / "Friends" / "general" / "2025-10.sqlite").exists()
+    assert not (tmp_path / "Renamed" / "general" / "2025-10.sqlite").exists()
 
 
 def test_write_message_is_idempotent(tmp_path: Path):
@@ -376,8 +460,8 @@ def test_commit_page_spans_multiple_shards_across_month_boundary(tmp_path: Path)
     commit_page(store, catalog, "1", [(oct_msg, map_message(oct_msg)), (nov_msg, map_message(nov_msg))],
                 oldest_id="100", newest_id="101")
 
-    assert (tmp_path / "Friends" / "2025-10.sqlite").exists()
-    assert (tmp_path / "Friends" / "2025-11.sqlite").exists()
+    assert (tmp_path / "Friends" / "general" / "2025-10.sqlite").exists()
+    assert (tmp_path / "Friends" / "general" / "2025-11.sqlite").exists()
     oct_shard = store.get_shard("1", SEOUL_MIDNIGHT_UTC)
     nov_shard = store.get_shard("1", nov_time)
     assert oct_shard.execute("SELECT COUNT(*) FROM messages").fetchone()[0] == 1
