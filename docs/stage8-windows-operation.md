@@ -35,3 +35,19 @@ file to manually delete after a crash.
 `logs/live-YYYYMMDD.log` (next to `config.json`) before anything else
 runs -- one file per calendar day. Nothing deletes old log files
 automatically; clean up `logs/` by hand occasionally if it grows large.
+
+## Syncing to the deployed remote mirror
+
+`run_sync.bat` runs `archive sync` (see `docs/superpowers/specs/` for
+the sync design), pushing any changed archive files to the deployed
+VM. Register it the same way as above, except the trigger should
+repeat on an interval -- in the Triggers tab, after picking **On a
+schedule**, check **Repeat task every** and set it (30 minutes is a
+reasonable default). This task is quick and exits on its own each run,
+so it doesn't need "run whether logged on or not" unless you want it
+to work while the machine is locked.
+
+Requires `sync_remote_host`, `sync_remote_user`, `sync_remote_data_dir`,
+and `sync_ssh_key_path` set in `config.json` (see
+`config.example.json`); `archive sync` prints which key is missing and
+exits non-zero if any aren't set, rather than silently doing nothing.
