@@ -78,3 +78,139 @@ class FakeGuild:
 
     async def active_threads(self):
         return self._active_threads
+
+
+class FakeChannelRef:
+    def __init__(self, id):
+        self.id = id
+
+
+class FakeUserRef:
+    def __init__(self, id):
+        self.id = id
+
+
+class FakeMessageFlags:
+    def __init__(self, value=0):
+        self.value = value
+
+
+class FakeMessageReference:
+    def __init__(self, message_id):
+        self.message_id = message_id
+
+
+class FakeAttachment:
+    def __init__(self, id, filename, content_type=None, size=0,
+                 width=None, height=None, duration=None, description=None):
+        self.id = id
+        self.filename = filename
+        self.content_type = content_type
+        self.size = size
+        self.width = width
+        self.height = height
+        self.duration = duration
+        self.description = description
+
+
+class FakeMessage:
+    def __init__(self, id, channel_id, author_id, content="", created_at=None,
+                 edited_at=None, reference=None, mention_everyone=False,
+                 flags_value=0, attachments=None, reactions=None,
+                 mentions=None, role_mentions=None, stickers=None,
+                 poll=None, embeds=None):
+        self.id = id
+        self.channel = FakeChannelRef(channel_id)
+        self.author = FakeUserRef(author_id)
+        self.content = content
+        self.created_at = created_at
+        self.edited_at = edited_at
+        self.reference = reference
+        self.mention_everyone = mention_everyone
+        self.flags = FakeMessageFlags(flags_value)
+        self.attachments = attachments or []
+        self.reactions = reactions or []
+        self.mentions = mentions or []
+        self.role_mentions = role_mentions or []
+        self.stickers = stickers or []
+        self.poll = poll
+        self.embeds = embeds or []
+
+
+class FakeReaction:
+    def __init__(self, emoji, count, custom=False, animated=False):
+        self.emoji = emoji
+        self.count = count
+        self._custom = custom
+        if custom:
+            self.emoji = _FakeCustomEmoji(str(emoji), animated)
+
+    def is_custom_emoji(self) -> bool:
+        return self._custom
+
+
+class _FakeCustomEmoji:
+    def __init__(self, text, animated):
+        self._text = text
+        self.animated = animated
+
+    def __str__(self):
+        return self._text
+
+
+class FakeSticker:
+    def __init__(self, id, name):
+        self.id = id
+        self.name = name
+
+
+class FakePollAnswer:
+    def __init__(self, id, text, vote_count):
+        self.id = id
+        self.text = text
+        self.vote_count = vote_count
+
+
+class FakePoll:
+    def __init__(self, question, multiple=False, expires_at=None, answers=None):
+        # Real discord.py: Poll.question is a str property (self._question_media.text),
+        # not an object with .text -- confirmed via inspect.getsource after this
+        # mismatch caused a live crash ('str' object has no attribute 'text').
+        self.question = question
+        self.multiple = multiple
+        self.expires_at = expires_at
+        self.answers = answers or []
+
+
+class FakeHistoryChannel:
+    """A minimal channel double for backfill tests -- separate from
+    FakeChannel (which models discovery's archived_threads surface) since
+    backfill only needs .id and .history(), not thread pagination."""
+    def __init__(self, id, messages, forbidden=False, http_error=False):
+        self.id = id
+        self._messages = sorted(messages, key=lambda m: m.id)
+        self._forbidden = forbidden
+        self._http_error = http_error
+
+    async def history(self, *, limit=100, after=None, oldest_first=True):
+        if self._forbidden:
+            raise discord.Forbidden(FakeResponse(), "Missing Permissions")
+        if self._http_error:
+            raise discord.HTTPException(FakeResponse(), "Internal Server Error")
+        after_id = after.id if after is not None else 0
+        remaining = [m for m in self._messages if m.id > after_id]
+        for m in remaining[:limit]:
+            yield m
+
+
+class FakeClient:
+    """A minimal Client double for backfill_all_pending: maps channel id
+    -> channel object (or an exception to raise) for fetch_channel."""
+    def __init__(self, channels: dict, errors: dict | None = None):
+        self._channels = channels
+        self._errors = errors or {}
+
+    async def fetch_channel(self, channel_id: int):
+        if channel_id in self._errors:
+            raise self._errors[channel_id]
+        return self._channels[channel_id]

@@ -119,11 +119,19 @@ text channels. A channel/thread that disappears from a discovery pass is marked
 findings.
 
 Backfill proceeds oldest-first from each channel's checkpoint,
-`history(limit=100, before=checkpoint, oldest_first=True)`, committed per §4.1. Each
-channel/thread is wrapped in its own try/except: a 403 or other API failure sets
-`status=inaccessible`/`failed` with the error recorded as `gap_reason`, and backfill
-moves on to the next channel rather than aborting the entire crawl. Rate limits are
-handled by discord.py itself (already-installed dependency; no custom limiter).
+`history(limit=100, after=Object(id=checkpoint), oldest_first=True)`, committed per
+§4.1 (corrected from an earlier `before=checkpoint` draft: reading discord.py's actual
+`history()` implementation shows `oldest_first=True` always paginates via its internal
+`after`-based strategy, defaulting to the oldest message in the channel when `after`
+isn't given — passing `before` alongside it only filters an upper bound, it is not a
+resume cursor, and using it as one would silently restart from the channel's beginning
+on every call instead of resuming). `coverage.backfill_checkpoint` therefore holds the
+newest message ID successfully archived so far — a high-water mark moving forward in
+time, not an "oldest reached" cursor. Each channel/thread is wrapped in its own
+try/except: a 403 or other API failure sets `status=inaccessible`/`failed` with the
+error recorded as `gap_reason`, and backfill moves on to the next channel rather than
+aborting the entire crawl. Rate limits are handled by discord.py itself
+(already-installed dependency; no custom limiter).
 
 ## 6. Live capture & offline recovery (corrected)
 

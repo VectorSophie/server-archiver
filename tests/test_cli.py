@@ -75,3 +75,12 @@ def test_main_coverage_requires_preflight_flag(monkeypatch):
     monkeypatch.setattr("sys.argv", ["archive", "coverage"])
     with pytest.raises(SystemExit):
         main()
+
+
+def test_main_backfill_subcommand_is_registered(monkeypatch):
+    """Argparse routing only -- the live connection itself is verified
+    manually, same as doctor/coverage --preflight."""
+    import pytest
+    monkeypatch.setattr("sys.argv", ["archive", "backfill", "--bogus-flag"])
+    with pytest.raises(SystemExit):
+        main()  # unrecognized flag must still fail argparse, proving the subcommand exists

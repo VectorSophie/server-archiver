@@ -11,10 +11,12 @@ from pathlib import Path
 
 import discord
 
+from archiver.backfill import backfill_all_pending
 from archiver.config import load_config
 from archiver.db import connect_catalog
 from archiver.discovery import discover_guild
 from archiver.discord_io import load_token
+from archiver.store import ShardStore
 
 HERE = Path(__file__).parent.parent
 
@@ -149,9 +151,47 @@ async def _run_coverage_preflight(config) -> int:
     return 0
 
 
+async def _run_backfill(config) -> int:
+    catalog_conn = connect_catalog(config.data_dir / "catalog.sqlite")
+    store = ShardStore(config.data_dir, catalog_conn)
+    intents = discord.Intents.default()
+    intents.message_content = True  # backfill reads actual message content
+    client = discord.Client(intents=intents)
+    error: Exception | None = None
+
+    @client.event
+    async def on_ready():
+        nonlocal error
+        try:
+            guild = client.get_guild(int(config.guild_id))
+            if guild is None:
+                raise RuntimeError(f"configured guild id {config.guild_id} not found")
+            await backfill_all_pending(client, catalog_conn, store)
+        except Exception as e:
+            error = e
+        finally:
+            store.close_all()
+            await client.close()
+
+    token = load_token(HERE / ".env")
+    try:
+        await client.start(token)
+    except Exception as e:
+        print(f"backfill failed to connect: {e}")
+        return 1
+
+    if error is not None:
+        print(f"backfill failed: {error}")
+        return 1
+
+    print("Backfill pass complete.")
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(prog="archive")
     subparsers = parser.add_subparsers(dest="command", required=True)
+    subparsers.add_parser("backfill")
     subparsers.add_parser("doctor")
     coverage_parser = subparsers.add_parser("coverage")
     coverage_parser.add_argument("--preflight", action="store_true")
@@ -163,6 +203,8 @@ def main() -> int:
 
     config = load_config(HERE / "config.json")
 
+    if args.command == "backfill":
+        return asyncio.run(_run_backfill(config))
     if args.command == "doctor":
         return asyncio.run(_run_doctor(config))
     if args.command == "coverage":
