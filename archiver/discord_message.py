@@ -23,6 +23,7 @@ def map_message(message) -> dict:
         "reply_to_id": reply_to_id,
         "mention_everyone": int(message.mention_everyone),
         "flags": message.flags.value,
+        "message_type": message.type.value,
         "deleted_utc": None,
     }
 

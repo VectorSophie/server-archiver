@@ -86,8 +86,10 @@ class FakeChannelRef:
 
 
 class FakeUserRef:
-    def __init__(self, id):
+    def __init__(self, id, name=None, display_name=None):
         self.id = id
+        self.name = name if name is not None else f"user{id}"
+        self.display_name = display_name if display_name is not None else self.name
 
 
 class FakeMessageFlags:
@@ -113,15 +115,21 @@ class FakeAttachment:
         self.description = description
 
 
+class FakeMessageType:
+    def __init__(self, value=0):
+        self.value = value
+
+
 class FakeMessage:
     def __init__(self, id, channel_id, author_id, content="", created_at=None,
                  edited_at=None, reference=None, mention_everyone=False,
                  flags_value=0, attachments=None, reactions=None,
                  mentions=None, role_mentions=None, stickers=None,
-                 poll=None, embeds=None):
+                 poll=None, embeds=None, author_name=None, author_display_name=None,
+                 type_=None):
         self.id = id
         self.channel = FakeChannelRef(channel_id)
-        self.author = FakeUserRef(author_id)
+        self.author = FakeUserRef(author_id, name=author_name, display_name=author_display_name)
         self.content = content
         self.created_at = created_at
         self.edited_at = edited_at
@@ -135,6 +143,7 @@ class FakeMessage:
         self.stickers = stickers or []
         self.poll = poll
         self.embeds = embeds or []
+        self.type = type_ or FakeMessageType()
 
 
 class FakeReaction:
@@ -210,12 +219,28 @@ class FakeHistoryChannel:
 
 class FakeClient:
     """A minimal Client double for backfill_all_pending: maps channel id
-    -> channel object (or an exception to raise) for fetch_channel."""
-    def __init__(self, channels: dict, errors: dict | None = None):
-        self._channels = channels
+    -> channel object (or an exception to raise) for fetch_channel. Also
+    supports fetch_user for backfill_missing_users, via the same
+    id -> (user object or exception) mapping style."""
+    def __init__(self, channels: dict | None = None, errors: dict | None = None,
+                 users: dict | None = None, user_errors: dict | None = None):
+        self._channels = channels or {}
         self._errors = errors or {}
+        self._users = users or {}
+        self._user_errors = user_errors or {}
 
     async def fetch_channel(self, channel_id: int):
         if channel_id in self._errors:
             raise self._errors[channel_id]
         return self._channels[channel_id]
+
+    async def fetch_user(self, user_id: int):
+        if user_id in self._user_errors:
+            raise self._user_errors[user_id]
+        return self._users[user_id]
+
+
+class FakeUser:
+    def __init__(self, id, name):
+        self.id = id
+        self.name = name

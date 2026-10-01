@@ -94,3 +94,22 @@ def test_poll_and_answers_roundtrip(tmp_path: Path):
     ).fetchone()
     assert answer["text"] == "Chess"
     assert answer["vote_count"] == 3
+
+
+def test_messages_author_id_has_an_index(tmp_path):
+    conn = connect_shard(tmp_path / "shard.sqlite")
+    rows = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='messages'"
+    ).fetchall()
+    names = {r["name"] for r in rows}
+    assert any("author" in n.lower() for n in names)
+
+
+def test_messages_table_has_message_type_column_defaulting_to_zero(tmp_path):
+    conn = connect_shard(tmp_path / "shard.sqlite")
+    conn.execute(
+        "INSERT INTO messages (id, channel_id, author_id, content, created_utc, "
+        "mention_everyone, flags) VALUES ('1', '1', '1', '', '2025-10-15T00:00:00Z', 0, 0)"
+    )
+    row = conn.execute("SELECT message_type FROM messages WHERE id='1'").fetchone()
+    assert row["message_type"] == 0

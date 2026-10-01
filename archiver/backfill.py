@@ -10,6 +10,7 @@ import discord
 
 from archiver.discord_message import map_message
 from archiver.store import ShardStore, commit_page
+from archiver.users import map_author, upsert_user
 
 PAGE_SIZE = 100
 
@@ -62,6 +63,8 @@ async def backfill_channel(discord_channel, catalog_conn: sqlite3.Connection, st
                 break
 
             pages = [(m, map_message(m)) for m in messages]
+            for m in messages:
+                upsert_user(catalog_conn, map_author(m))
             oldest_id = str(messages[0].id)
             newest_id = str(messages[-1].id)
             commit_page(store, catalog_conn, channel_id, pages, oldest_id, newest_id)

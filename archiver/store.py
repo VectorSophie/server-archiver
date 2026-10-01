@@ -121,9 +121,9 @@ def write_message(shard_conn: sqlite3.Connection, mapped: dict) -> bool:
 
     shard_conn.execute(
         "INSERT INTO messages (id, channel_id, author_id, content, created_utc, "
-        "edited_utc, reply_to_id, mention_everyone, flags, deleted_utc) "
+        "edited_utc, reply_to_id, mention_everyone, flags, message_type, deleted_utc) "
         "VALUES (:id, :channel_id, :author_id, :content, :created_utc, :edited_utc, "
-        ":reply_to_id, :mention_everyone, :flags, :deleted_utc) "
+        ":reply_to_id, :mention_everyone, :flags, :message_type, :deleted_utc) "
         "ON CONFLICT(id) DO UPDATE SET content=excluded.content, "
         "edited_utc=excluded.edited_utc, mention_everyone=excluded.mention_everyone, "
         "flags=excluded.flags",

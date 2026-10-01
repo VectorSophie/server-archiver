@@ -22,6 +22,7 @@ def make_message(**overrides) -> dict:
         "reply_to_id": None,
         "mention_everyone": 0,
         "flags": 0,
+        "message_type": 0,
         "deleted_utc": None,
     }
     msg.update(overrides)

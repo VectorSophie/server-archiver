@@ -12,7 +12,8 @@ def test_map_message_core_fields():
     assert mapped["message"] == {
         "id": "100", "channel_id": "1", "author_id": "2", "content": "hello",
         "created_utc": "2025-10-15T03:00:00Z", "edited_utc": None,
-        "reply_to_id": None, "mention_everyone": 0, "flags": 0, "deleted_utc": None,
+        "reply_to_id": None, "mention_everyone": 0, "flags": 0,
+        "message_type": 0, "deleted_utc": None,
     }
 
 
@@ -149,3 +150,19 @@ def test_map_message_poll_against_real_discord_poll_object():
     mapped = map_message(msg)
 
     assert mapped["poll"]["question"] == "Best game?"
+
+
+def test_map_message_captures_message_type():
+    from tests.discord_fakes import FakeMessageType
+    msg = FakeMessage(
+        id=205, channel_id=1, author_id=2, content="boosted!", created_at=CREATED,
+        type_=FakeMessageType(7),  # discord.MessageType.user_premium_guild_subscription
+    )
+    mapped = map_message(msg)
+    assert mapped["message"]["message_type"] == 7
+
+
+def test_map_message_default_type_is_zero():
+    msg = FakeMessage(id=206, channel_id=1, author_id=2, content="hi", created_at=CREATED)
+    mapped = map_message(msg)
+    assert mapped["message"]["message_type"] == 0

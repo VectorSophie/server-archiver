@@ -2,7 +2,9 @@
 selection, and result formatting for the `archive find` CLI command.
 No discord.py import in this module -- search only ever reads
 already-archived data (spec §7)."""
+import re
 import shlex
+import sqlite3
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -14,8 +16,59 @@ from archiver.store import month_bucket
 
 _FILTER_KEYS = {"from", "in", "during", "after", "before", "has", "file", "ext"}
 SEOUL = ZoneInfo("Asia/Seoul")
-_HAS_VALUES = {"image", "video", "audio", "embed", "poll", "sticker", "reaction", "attachment"}
+HAS_VALUES = {"image", "video", "audio", "embed", "poll", "sticker", "reaction", "attachment"}
 _ISO_FMT = "%Y-%m-%dT%H:%M:%SZ"
+
+_LIKE_REGEX_CACHE: dict[tuple[str, str | None], re.Pattern] = {}
+
+
+def _compile_like_pattern(pattern: str, escape: str | None) -> re.Pattern:
+    cache_key = (pattern, escape)
+    cached = _LIKE_REGEX_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+    out = []
+    i = 0
+    n = len(pattern)
+    while i < n:
+        c = pattern[i]
+        if escape and c == escape and i + 1 < n:
+            out.append(re.escape(pattern[i + 1]))
+            i += 2
+            continue
+        if c == "%":
+            out.append(".*")
+        elif c == "_":
+            out.append(".")
+        else:
+            out.append(re.escape(c))
+        i += 1
+    compiled = re.compile("^" + "".join(out) + "$", re.IGNORECASE | re.DOTALL)
+    _LIKE_REGEX_CACHE[cache_key] = compiled
+    return compiled
+
+
+def _unicode_like(pattern, value, escape=None):
+    if pattern is None or value is None:
+        return None
+    return 1 if _compile_like_pattern(pattern, escape).match(value) else 0
+
+
+def _register_unicode_like(conn: sqlite3.Connection) -> None:
+    """Override SQLite's built-in LIKE (ASCII-only case folding, so
+    e.g. 'École' doesn't match 'ÉCOLE') with a Python-regex
+    implementation using Python's Unicode-aware re.IGNORECASE, for
+    connections this module opens for searching. Never applied to
+    write-path connections elsewhere in this codebase -- the override
+    is per-connection, not global."""
+    conn.create_function("LIKE", 2, lambda p, v: _unicode_like(p, v))
+    conn.create_function("LIKE", 3, lambda p, v, e: _unicode_like(p, v, e))
+
+
+def _open_search_shard(data_dir: Path, shard_path: str) -> sqlite3.Connection:
+    conn = connect_shard(data_dir / shard_path)
+    _register_unicode_like(conn)
+    return conn
 
 
 @dataclass
@@ -72,13 +125,18 @@ def _day_or_month_bounds_utc(date_str: str) -> tuple[str, str]:
 def _resolve_channel_ids(catalog_conn, values: list[str]) -> list[str]:
     ids: list[str] = []
     for value in values:
-        if value.isdigit():
-            ids.append(value)
-        else:
-            rows = catalog_conn.execute(
-                "SELECT id FROM channels WHERE LOWER(name) LIKE ?", (f"%{value.lower()}%",)
+        matched = [value] if value.isdigit() else [
+            r["id"] for r in catalog_conn.execute(
+                "SELECT id FROM channels WHERE LOWER(name) LIKE ? ESCAPE '\\'",
+                (f"%{_escape_like(value.lower())}%",),
             ).fetchall()
-            ids.extend(r["id"] for r in rows)
+        ]
+        for channel_id in matched:
+            ids.append(channel_id)
+            thread_rows = catalog_conn.execute(
+                "SELECT id FROM channels WHERE parent_id=?", (channel_id,)
+            ).fetchall()
+            ids.extend(r["id"] for r in thread_rows)
     return ids
 
 
@@ -88,10 +146,10 @@ def _resolve_author_ids(catalog_conn, values: list[str]) -> list[str]:
         if value.isdigit():
             ids.append(value)
         else:
-            pattern = f"%{value.lower()}%"
+            pattern = f"%{_escape_like(value.lower())}%"
             rows = catalog_conn.execute(
-                "SELECT id FROM users WHERE LOWER(username) LIKE ? "
-                "UNION SELECT user_id AS id FROM user_nicknames WHERE LOWER(nickname) LIKE ?",
+                "SELECT id FROM users WHERE LOWER(username) LIKE ? ESCAPE '\\' "
+                "UNION SELECT user_id AS id FROM user_nicknames WHERE LOWER(nickname) LIKE ? ESCAPE '\\'",
                 (pattern, pattern),
             ).fetchall()
             ids.extend(r["id"] for r in rows)
@@ -112,7 +170,7 @@ def resolve_query(catalog_conn, parsed: ParsedQuery) -> ResolvedQuery:
     if "before" in filters:
         _, before_utc = _day_or_month_bounds_utc(filters["before"][-1])
 
-    has = {v.lower() for v in filters.get("has", []) if v.lower() in _HAS_VALUES}
+    has = {v.lower() for v in filters.get("has", []) if v.lower() in HAS_VALUES}
 
     return ResolvedQuery(
         text=parsed.text,
@@ -232,7 +290,7 @@ def search(catalog_conn, data_dir: Path, raw_query: str, *, limit: int = 500) ->
 
     results = []
     for channel_id, shard_path in candidate_shards(catalog_conn, resolved):
-        shard_conn = connect_shard(data_dir / shard_path)
+        shard_conn = _open_search_shard(data_dir, shard_path)
         try:
             has_fts = ensure_messages_fts(shard_conn)
             sql, params = build_message_sql(resolved, channel_id, has_fts)
@@ -264,7 +322,7 @@ def get_context(catalog_conn, data_dir: Path, channel_id: str, message_id: str,
 
         id_index: list[tuple[str, str]] = []  # (message_id, shard_path), sorted by id
         for row in shard_rows:
-            conn = connect_shard(data_dir / row["shard_path"])
+            conn = _open_search_shard(data_dir, row["shard_path"])
             try:
                 ids = conn.execute(
                     "SELECT id FROM messages WHERE channel_id=? AND deleted_utc IS NULL ORDER BY id",
@@ -287,7 +345,7 @@ def get_context(catalog_conn, data_dir: Path, channel_id: str, message_id: str,
             by_shard.setdefault(shard_path, []).append(mid)
         out: list[dict] = []
         for shard_path, ids in by_shard.items():
-            conn = connect_shard(data_dir / shard_path)
+            conn = _open_search_shard(data_dir, shard_path)
             try:
                 placeholders = ",".join("?" for _ in ids)
                 rows = conn.execute(

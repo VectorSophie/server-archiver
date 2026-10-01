@@ -105,7 +105,13 @@ CREATE TABLE IF NOT EXISTS report_last_coverage (
 );
 """
 
-CATALOG_MIGRATIONS: list[tuple[int, str]] = [(1, CATALOG_SCHEMA_V1), (2, CATALOG_SCHEMA_V2)]
+CATALOG_SCHEMA_V3 = """
+ALTER TABLE report_fingerprint ADD COLUMN filename TEXT NOT NULL DEFAULT '';
+"""
+
+CATALOG_MIGRATIONS: list[tuple[int, str]] = [
+    (1, CATALOG_SCHEMA_V1), (2, CATALOG_SCHEMA_V2), (3, CATALOG_SCHEMA_V3),
+]
 
 
 def connect_catalog(path: Path) -> sqlite3.Connection:
@@ -221,7 +227,17 @@ CREATE TABLE IF NOT EXISTS events (
 );
 """
 
-SHARD_MIGRATIONS: list[tuple[int, str]] = [(1, SHARD_SCHEMA_V1)]
+SHARD_SCHEMA_V2 = """
+CREATE INDEX IF NOT EXISTS idx_messages_author ON messages(author_id);
+"""
+
+SHARD_SCHEMA_V3 = """
+ALTER TABLE messages ADD COLUMN message_type INTEGER NOT NULL DEFAULT 0;
+"""
+
+SHARD_MIGRATIONS: list[tuple[int, str]] = [
+    (1, SHARD_SCHEMA_V1), (2, SHARD_SCHEMA_V2), (3, SHARD_SCHEMA_V3),
+]
 
 
 def connect_shard(path: Path) -> sqlite3.Connection:

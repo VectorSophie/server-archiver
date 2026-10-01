@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from archiver.db import connect_shard
+from archiver.db import connect_catalog, connect_shard
 from archiver.fts import detect_trigram_support, ensure_messages_fts
 
 
@@ -98,6 +98,25 @@ def test_ensure_messages_fts_backfills_existing_rows(tmp_path: Path):
         "SELECT message_id FROM messages_fts WHERE messages_fts MATCH 'existing'"
     ).fetchall()
     assert [r["message_id"] for r in rows] == ["1"]
+
+
+def test_detect_trigram_support_is_cached_across_calls(tmp_path):
+    import archiver.fts as fts_module
+    fts_module._trigram_support_cache = None  # reset for test isolation
+    conn = connect_catalog(tmp_path / "a.sqlite")
+    first = detect_trigram_support(conn)
+
+    # sqlite3.Connection is an immutable builtin type (no __dict__ on
+    # instances, no patching its methods), so spy via SQLite's own
+    # trace callback instead of monkeypatching conn.execute.
+    probe_calls = []
+    conn.set_trace_callback(
+        lambda sql: probe_calls.append(sql) if "fts_trigram_probe" in sql else None
+    )
+
+    second = detect_trigram_support(conn)
+    assert second == first
+    assert probe_calls == []  # no new probe query ran -- cached result reused
 
 
 def test_korean_midword_fragment_matches_when_trigram_supported(tmp_path: Path):

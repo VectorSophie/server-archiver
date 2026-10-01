@@ -12,16 +12,22 @@ availability: queries shorter than 3 characters need the LIKE fallback even
 when messages_fts exists."""
 import sqlite3
 
+_trigram_support_cache: bool | None = None
+
 
 def detect_trigram_support(conn: sqlite3.Connection) -> bool:
+    global _trigram_support_cache
+    if _trigram_support_cache is not None:
+        return _trigram_support_cache
     try:
         conn.execute(
             "CREATE VIRTUAL TABLE temp.fts_trigram_probe USING fts5(x, tokenize='trigram')"
         )
         conn.execute("DROP TABLE temp.fts_trigram_probe")
-        return True
+        _trigram_support_cache = True
     except sqlite3.OperationalError:
-        return False
+        _trigram_support_cache = False
+    return _trigram_support_cache
 
 
 def ensure_messages_fts(conn: sqlite3.Connection) -> bool:

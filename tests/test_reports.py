@@ -148,6 +148,19 @@ def test_render_report_states_counting_rules_explicitly():
     assert "excluded from rankings" in text.lower()
 
 
+def test_render_report_resolves_known_usernames_falls_back_to_id_for_unknown():
+    stats = ScopeStats(total_messages=10, top_authors=[("20", 6), ("21", 4)],
+                        top_words=[], attachment_counts={})
+    coverage_rows = [
+        {"channel_id": "1", "name": "chat", "type": "text", "status": "complete",
+         "gap_reason": None, "message_count": 10},
+    ]
+    text = render_report("Server", coverage_rows, stats, newly_inaccessible=[],
+                          usernames={"20": "alice"})
+    assert "alice" in text
+    assert "21" in text  # no users row for "21" -- falls back to the raw id
+
+
 def test_render_report_surfaces_newly_inaccessible_channels():
     stats = ScopeStats(total_messages=0, top_authors=[], top_words=[], attachment_counts={})
     coverage_rows = [
@@ -158,3 +171,123 @@ def test_render_report_surfaces_newly_inaccessible_channels():
     text = render_report("Server", coverage_rows, stats, newly_inaccessible)
     assert "gone" in text
     assert "newly" in text.lower() or "just" in text.lower() or "since the last report" in text.lower()
+
+
+def test_gather_scope_stats_reuses_cache_across_calls_for_the_same_channel(tmp_path):
+    catalog = connect_catalog(tmp_path / "catalog.sqlite")
+    now = "2025-10-15T00:00:00Z"
+    catalog.execute(
+        "INSERT INTO channels (id, name, type, parent_id, category_id, is_archived, "
+        "first_seen_utc, last_seen_utc) VALUES ('1', 'chat', 'text', NULL, NULL, 0, ?, ?)",
+        (now, now),
+    )
+    catalog.execute(
+        "INSERT INTO channel_month_shard (channel_id, yyyymm, category_id, shard_path) "
+        "VALUES ('1', '2025-10', 'uncategorized', 'uncategorized/chat/2025-10.sqlite')"
+    )
+    catalog.commit()
+    shard_path = tmp_path / "uncategorized" / "chat" / "2025-10.sqlite"
+    shard_path.parent.mkdir(parents=True)
+    _write_shard_with_messages(shard_path, [make_message(content="hello", channel_id="1")])
+
+    cache: dict = {}
+    first = gather_scope_stats(catalog, tmp_path, ["1"], channel_stats_cache=cache)
+    assert "1" in cache
+
+    # Delete the shard file entirely -- if gather_scope_stats re-scans
+    # channel "1" instead of using the cache, this would now raise or
+    # return zero messages instead of the cached count.
+    shard_path.unlink()
+    second = gather_scope_stats(catalog, tmp_path, ["1"], channel_stats_cache=cache)
+    assert second.total_messages == first.total_messages == 1
+
+
+def test_gather_scope_stats_skips_a_missing_shard_file_without_creating_it(tmp_path):
+    catalog = connect_catalog(tmp_path / "catalog.sqlite")
+    now = "2025-10-15T00:00:00Z"
+    catalog.execute(
+        "INSERT INTO channels (id, name, type, parent_id, category_id, is_archived, "
+        "first_seen_utc, last_seen_utc) VALUES ('1', 'chat', 'text', NULL, NULL, 0, ?, ?)",
+        (now, now),
+    )
+    catalog.execute(
+        "INSERT INTO channel_month_shard (channel_id, yyyymm, category_id, shard_path) "
+        "VALUES ('1', '2025-10', 'uncategorized', 'uncategorized/chat/2025-10.sqlite')"
+    )
+    catalog.commit()
+    # Note: the shard file/directory is never created on disk.
+
+    stats = gather_scope_stats(catalog, tmp_path, ["1"])
+    assert stats.total_messages == 0
+    assert not (tmp_path / "uncategorized" / "chat" / "2025-10.sqlite").exists()
+
+
+def test_gather_scope_stats_strips_urls_and_stopwords_from_word_rankings(tmp_path):
+    catalog = connect_catalog(tmp_path / "catalog.sqlite")
+    now = "2025-10-15T00:00:00Z"
+    catalog.execute(
+        "INSERT INTO channels (id, name, type, parent_id, category_id, is_archived, "
+        "first_seen_utc, last_seen_utc) VALUES ('1', 'chat', 'text', NULL, NULL, 0, ?, ?)",
+        (now, now),
+    )
+    catalog.execute(
+        "INSERT INTO channel_month_shard (channel_id, yyyymm, category_id, shard_path) "
+        "VALUES ('1', '2025-10', 'uncategorized', 'uncategorized/chat/2025-10.sqlite')"
+    )
+    catalog.commit()
+    shard_path = tmp_path / "uncategorized" / "chat" / "2025-10.sqlite"
+    shard_path.parent.mkdir(parents=True)
+
+    msg = make_message(
+        content="i think the signal is at https://example.com/path?x=1 check it out",
+        author_id="alice", channel_id="1",
+    )
+    _write_shard_with_messages(shard_path, [msg])
+
+    stats = gather_scope_stats(catalog, tmp_path, ["1"])
+    words = dict(stats.top_words)
+    assert "signal" in words and "check" in words  # real content words survive
+    for stopword in ("i", "the", "is", "at", "it"):
+        assert stopword not in words
+    for url_fragment in ("https", "example", "com", "path", "x"):
+        assert url_fragment not in words
+
+
+def test_render_report_escapes_pipe_characters_in_table_cells():
+    stats = ScopeStats(total_messages=1, top_authors=[("alice|bob", 1)],
+                        top_words=[("a|b", 1)], attachment_counts={})
+    coverage_rows = [
+        {"channel_id": "1", "name": "chat|room", "type": "text", "status": "complete",
+         "gap_reason": "weird|reason", "message_count": 1},
+    ]
+    text = render_report("Server", coverage_rows, stats, newly_inaccessible=[])
+    # A literal "|" from data must appear escaped, not as a raw column separator.
+    assert "chat\\|room" in text
+    assert "weird\\|reason" in text
+    assert "alice\\|bob" in text
+    assert "a\\|b" in text
+
+
+def test_gather_scope_stats_excludes_system_messages_from_rankings_not_from_total(tmp_path):
+    catalog = connect_catalog(tmp_path / "catalog.sqlite")
+    now = "2025-10-15T00:00:00Z"
+    catalog.execute(
+        "INSERT INTO channels (id, name, type, parent_id, category_id, is_archived, "
+        "first_seen_utc, last_seen_utc) VALUES ('1', 'chat', 'text', NULL, NULL, 0, ?, ?)",
+        (now, now),
+    )
+    catalog.execute(
+        "INSERT INTO channel_month_shard (channel_id, yyyymm, category_id, shard_path) "
+        "VALUES ('1', '2025-10', 'uncategorized', 'uncategorized/chat/2025-10.sqlite')"
+    )
+    catalog.commit()
+    shard_path = tmp_path / "uncategorized" / "chat" / "2025-10.sqlite"
+    shard_path.parent.mkdir(parents=True)
+
+    pin_notice = make_message(content="", author_id="alice", channel_id="1", message_type=6)  # channel_pinned_message
+    real_msg = make_message(content="hello everyone", author_id="alice", channel_id="1", message_type=0)
+    _write_shard_with_messages(shard_path, [pin_notice, real_msg])
+
+    stats = gather_scope_stats(catalog, tmp_path, ["1"])
+    assert stats.total_messages == 2  # both counted in the archive total
+    assert dict(stats.top_authors)["alice"] == 1  # only the real message counted toward ranking

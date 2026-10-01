@@ -541,3 +541,17 @@ def test_commit_page_counts_only_newly_inserted_messages(tmp_path):
     commit_page(store, catalog, "1", [(msg_a, mapped_a), (msg_c, mapped_c)], "100", "102")
     row = catalog.execute("SELECT message_count FROM coverage WHERE channel_id='1'").fetchone()
     assert row["message_count"] == 3  # not 4 -- msg_a was already counted
+
+
+def test_write_message_stores_message_type(tmp_path):
+    shard_conn = connect_shard(tmp_path / "2025-10.sqlite")
+    mapped = {
+        "message": make_message(content="hello", message_type=7),
+        "attachments": [], "reactions": [], "mentions_user": [], "mentions_role": [],
+        "stickers": [], "poll": None, "poll_answers": [], "embeds": [], "embed_fields": [],
+    }
+    write_message(shard_conn, mapped)
+    row = shard_conn.execute(
+        "SELECT message_type FROM messages WHERE id=?", (mapped["message"]["id"],)
+    ).fetchone()
+    assert row["message_type"] == 7

@@ -95,6 +95,20 @@ def test_apply_live_message_writes_but_skips_checkpoint_when_advance_checkpoint_
     assert shard.execute("SELECT content FROM messages WHERE id='100'").fetchone()["content"] == "hi"
 
 
+def test_apply_live_message_populates_users_table(tmp_path):
+    catalog = connect_catalog(tmp_path / "catalog.sqlite")
+    _seed_channel(catalog)
+    store = ShardStore(tmp_path, catalog)
+    msg = FakeMessage(id=100, channel_id=1, author_id=2, content="hi", created_at=CREATED,
+                       author_name="alice")
+
+    apply_live_message(store, catalog, msg)
+
+    row = catalog.execute("SELECT username FROM users WHERE id='2'").fetchone()
+    assert row is not None
+    assert row["username"] == "alice"
+
+
 def test_apply_live_message_ignores_untracked_channel(tmp_path):
     catalog = connect_catalog(tmp_path / "catalog.sqlite")
     store = ShardStore(tmp_path, catalog)  # no channel seeded at all

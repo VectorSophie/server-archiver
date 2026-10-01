@@ -20,12 +20,13 @@ from archiver.db import connect_catalog
 from archiver.discovery import discover_guild
 from archiver.discord_io import load_token
 from archiver.live import apply_live_message, apply_raw_delete, apply_raw_edit, catch_up_missed_messages, rescan_recent_window
+from archiver.users import backfill_missing_users
 from archiver.report_state import (
     compute_scope_fingerprint, diff_newly_inaccessible, is_scope_dirty, mark_scope_generated,
-    save_coverage_snapshot,
+    save_coverage_snapshot, get_previous_filename, all_known_scopes, forget_scope,
 )
 from archiver.reports import channels_by_scope, gather_coverage, gather_scope_stats, render_report
-from archiver.search import format_result, get_context, search
+from archiver.search import HAS_VALUES, format_result, get_context, search, tokenize_query
 from archiver.store import ShardStore
 
 HERE = Path(__file__).parent.parent
@@ -177,6 +178,10 @@ async def _run_backfill(config) -> int:
             if guild is None:
                 raise RuntimeError(f"configured guild id {config.guild_id} not found")
             await backfill_all_pending(client, catalog_conn, store)
+            user_stats = await backfill_missing_users(client, catalog_conn, config.data_dir)
+            if user_stats["missing"]:
+                print(f"User catch-up: fetched {user_stats['fetched']}/{user_stats['missing']} "
+                      f"missing usernames ({user_stats['failed']} unreachable).")
         except Exception as e:
             error = e
         finally:
@@ -221,6 +226,15 @@ async def _run_live(config) -> int:
             await rescan_recent_window(client, catalog_conn, store)
             if backfill_task is None or backfill_task.done():
                 backfill_task = asyncio.create_task(backfill_all_pending(client, catalog_conn, store))
+            # After, not before, kicking off backfill: a network error in the
+            # user-catch-up sweep must not delay backfill starting until the
+            # next reconnect (reviewer-found scenario -- the sweep only
+            # isolates per-user NotFound/Forbidden/HTTPException, not every
+            # possible failure, e.g. a transport error).
+            user_stats = await backfill_missing_users(client, catalog_conn, config.data_dir)
+            if user_stats["missing"]:
+                print(f"User catch-up: fetched {user_stats['fetched']}/{user_stats['missing']} "
+                      f"missing usernames ({user_stats['failed']} unreachable).")
             print(f"Live capture running as {client.user}.")
         except Exception as e:
             print(f"live capture startup sequence failed: {e}. "
@@ -260,6 +274,10 @@ async def _run_live(config) -> int:
 def _run_find(config, raw_query: str, *, full: bool = False, context: int = 0,
               json_output: bool = False) -> int:
     catalog_conn = connect_catalog(config.data_dir / "catalog.sqlite")
+    parsed = tokenize_query(raw_query)
+    unknown_has = sorted({v for v in parsed.filters.get("has", []) if v.lower() not in HAS_VALUES})
+    if unknown_has:
+        print(f"warning: unrecognized has: value(s) ignored: {', '.join(unknown_has)}", file=sys.stderr)
     try:
         try:
             results = search(catalog_conn, config.data_dir, raw_query)
@@ -332,16 +350,9 @@ def _run_report(config, *, force: bool = False) -> int:
         excluded = frozenset(config.excluded_ranking_author_ids)
 
         generated, skipped = [], []
+        channel_stats_cache: dict = {}
         for scope, channel_ids in scopes.items():
-            current_fingerprint = compute_scope_fingerprint(catalog_conn, config.data_dir, channel_ids)
-            if not force and not is_scope_dirty(catalog_conn, scope, current_fingerprint):
-                skipped.append(scope)
-                continue
-
             scope_rows = [coverage_by_channel[cid] for cid in channel_ids if cid in coverage_by_channel]
-            stats = gather_scope_stats(catalog_conn, config.data_dir, channel_ids,
-                                        excluded_author_ids=excluded)
-            scope_newly_inaccessible = [r for r in newly_inaccessible if r["channel_id"] in channel_ids]
 
             if scope == "server":
                 label, filename = "Server", "server.md"
@@ -354,10 +365,63 @@ def _run_report(config, *, force: bool = False) -> int:
                 safe_name = "".join(c if c.isalnum() or c in "-_ " else "_" for c in label).strip() or category_id
                 filename = f"{safe_name}-{category_id[-6:]}.md"
 
-            text = render_report(label, scope_rows, stats, scope_newly_inaccessible)
+            # Computed unconditionally (not gated behind is_scope_dirty) so a
+            # category rename is detected and regenerated under its new
+            # filename even when nothing else about the scope's content
+            # changed -- the fingerprint never incorporates category_name,
+            # so a rename alone would otherwise never be seen as "dirty".
+            previous_filename = get_previous_filename(catalog_conn, scope)
+            renamed = previous_filename is not None and previous_filename != filename
+
+            current_fingerprint = compute_scope_fingerprint(catalog_conn, config.data_dir, channel_ids)
+            if not force and not renamed and not is_scope_dirty(catalog_conn, scope, current_fingerprint):
+                skipped.append(scope)
+                continue
+
+            stats = gather_scope_stats(catalog_conn, config.data_dir, channel_ids,
+                                        excluded_author_ids=excluded,
+                                        channel_stats_cache=channel_stats_cache)
+            scope_newly_inaccessible = [r for r in newly_inaccessible if r["channel_id"] in channel_ids]
+
+            author_ids = [author_id for author_id, _ in stats.top_authors]
+            usernames = {}
+            if author_ids:
+                placeholders = ",".join("?" for _ in author_ids)
+                usernames = {
+                    row["id"]: row["username"] for row in catalog_conn.execute(
+                        f"SELECT id, username FROM users WHERE id IN ({placeholders})", author_ids
+                    ).fetchall()
+                }
+            text = render_report(label, scope_rows, stats, scope_newly_inaccessible, usernames)
             (reports_dir / filename).write_text(text, encoding="utf-8")
-            mark_scope_generated(catalog_conn, scope, current_fingerprint)
+            if renamed and previous_filename.lower() != filename.lower():
+                # Windows filesystems are case-insensitive, so a case-only
+                # rename (e.g. "Yuri" -> "YURI") writes to the SAME file the
+                # write_text() above just wrote -- unlinking it here would
+                # delete the report that was just generated. Skip the delete
+                # entirely in that case; the write_text() already updated the
+                # file's actual casing on disk.
+                stale_path = reports_dir / previous_filename
+                if stale_path.exists():
+                    stale_path.unlink()
+            mark_scope_generated(catalog_conn, scope, current_fingerprint, filename)
             generated.append(filename)
+
+        removed = []
+        for old_scope, old_filename in all_known_scopes(catalog_conn).items():
+            if old_scope not in scopes:
+                # old_filename can be '' for a report_fingerprint row that
+                # predates this column (backfilled by CATALOG_SCHEMA_V3) and
+                # was never regenerated since -- reports_dir / '' resolves to
+                # reports_dir itself, so unlinking it would delete the whole
+                # reports directory. Only unlink when there's a real filename.
+                if old_filename:
+                    stale_path = reports_dir / old_filename
+                    if stale_path.exists():
+                        stale_path.unlink()
+                forget_scope(catalog_conn, old_scope)
+                if old_filename:
+                    removed.append(old_filename)
 
         save_coverage_snapshot(catalog_conn, coverage)
 
@@ -365,6 +429,8 @@ def _run_report(config, *, force: bool = False) -> int:
             print(f"Generated: {', '.join(generated)}")
         if skipped:
             print(f"Skipped (unchanged): {len(skipped)} scope(s)")
+        if removed:
+            print(f"Removed (category gone): {', '.join(removed)}")
         if not generated and not skipped:
             print("No channels discovered yet -- nothing to report.")
         return 0
@@ -380,11 +446,26 @@ def main() -> int:
     subparsers.add_parser("doctor")
     coverage_parser = subparsers.add_parser("coverage")
     coverage_parser.add_argument("--preflight", action="store_true")
-    find_parser = subparsers.add_parser("find")
-    find_parser.add_argument("query", nargs="*")
-    find_parser.add_argument("--full", action="store_true")
-    find_parser.add_argument("--context", type=int, default=0)
-    find_parser.add_argument("--json", action="store_true", dest="json_output")
+    find_parser = subparsers.add_parser(
+        "find",
+        help="Search archived messages",
+        description=(
+            "Search archived messages. Supports from:/in:/during:/after:/before:/has:/"
+            "file:/ext: filters and quoted phrases. Substring matches of 3+ characters use "
+            "an indexed trigram search when available; shorter queries, or any query when "
+            "trigram support is unavailable, fall back to a full scan of the filtered result "
+            "set, which is correctness-first and can be slow on large, unfiltered date ranges "
+            "-- narrow with a channel/date/author filter for better performance. "
+            "Note: after:/before: are inclusive of the given day (Asia/Seoul calendar day) "
+            "or month, unlike Discord's own search operators of the same name, which are "
+            "exclusive."
+        ),
+    )
+    find_parser.add_argument("query", nargs="*", help="Search terms and filters (omit for interactive mode)")
+    find_parser.add_argument("--full", action="store_true", help="Show full message content, not truncated")
+    find_parser.add_argument("--context", type=int, default=0, metavar="N",
+                              help="Show N messages before/after each result")
+    find_parser.add_argument("--json", action="store_true", dest="json_output", help="Output as JSON")
     subparsers.add_parser("live")
     report_parser = subparsers.add_parser("report")
     report_parser.add_argument("--force", action="store_true")

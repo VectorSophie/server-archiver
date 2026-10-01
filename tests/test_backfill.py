@@ -202,6 +202,24 @@ async def test_backfill_all_pending_marks_gone_channel_inaccessible_without_call
     assert row["gap_reason"] is not None
 
 
+async def test_backfill_channel_populates_users_table(tmp_path):
+    catalog = connect_catalog(tmp_path / "catalog.sqlite")
+    _seed_channel(catalog)
+    store = ShardStore(tmp_path, catalog)
+    messages = [
+        FakeMessage(id=100, channel_id=1, author_id=2, content="a", created_at=CREATED,
+                    author_name="alice"),
+        FakeMessage(id=101, channel_id=1, author_id=3, content="b", created_at=CREATED,
+                    author_name="bob"),
+    ]
+    channel = FakeHistoryChannel(id=1, messages=messages)
+
+    await backfill_channel(channel, catalog, store)
+
+    rows = {row["id"]: row["username"] for row in catalog.execute("SELECT id, username FROM users").fetchall()}
+    assert rows == {"2": "alice", "3": "bob"}
+
+
 class _FakeForumChannel:
     """Deliberately has no .history() -- discord.ForumChannel really has
     none (confirmed: hasattr(discord.ForumChannel, 'history') is False).

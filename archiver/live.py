@@ -14,6 +14,7 @@ import discord
 
 from archiver.discord_message import map_message
 from archiver.store import ShardStore, write_message
+from archiver.users import map_author, upsert_user
 
 _EDIT_FIELD_MAP = {"content": "content", "flags": "flags"}
 
@@ -76,6 +77,7 @@ def apply_live_message(store: ShardStore, catalog_conn: sqlite3.Connection, mess
                 "UPDATE coverage SET message_count=message_count+1 WHERE channel_id=?",
                 (channel_id,),
             )
+        upsert_user(catalog_conn, map_author(message))
         catalog_conn.commit()
     except BaseException:
         catalog_conn.rollback()

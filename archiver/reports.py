@@ -14,6 +14,26 @@ from archiver.db import connect_shard
 UNCATEGORIZED_SCOPE = "category:uncategorized"
 _CONTENT_TYPE_PREFIXES = ("image", "video", "audio")
 _WORD_RE = re.compile(r"\w+", re.UNICODE)
+_URL_RE = re.compile(r"https?://\S+")
+# A minimal, English-only stopword list -- real data showed word rankings
+# dominated by "i", "the", "a", URL fragments like "https"/"com", etc.,
+# which are technically correct under "simple tokenization" but close to
+# useless as a report. This has no effect on Korean (which has no overlap
+# with this list) and is not meant to be linguistically complete.
+_STOPWORDS = frozenset({
+    "the", "a", "an", "to", "of", "in", "on", "is", "it", "and", "or", "but",
+    "i", "you", "he", "she", "we", "they", "this", "that", "these", "those",
+    "be", "was", "were", "am", "are", "for", "with", "at", "by", "from",
+    "as", "so", "if", "then", "than", "not", "no", "do", "does", "did",
+    "s", "t", "re", "ll", "ve", "m", "d",
+})
+
+
+def _md_cell(value) -> str:
+    """Escape a value for use inside a markdown table cell -- a literal
+    `|` or newline in a channel name, author display name, or word would
+    otherwise break the table's column structure."""
+    return str(value).replace("|", "\\|").replace("\n", " ")
 
 
 def gather_coverage(catalog_conn: sqlite3.Connection) -> list[dict]:
@@ -55,39 +75,66 @@ class ScopeStats:
 
 
 def gather_scope_stats(catalog_conn: sqlite3.Connection, data_dir: Path, channel_ids: list[str],
-                        *, excluded_author_ids: frozenset = frozenset(), top_n: int = 20) -> ScopeStats:
+                        *, excluded_author_ids: frozenset = frozenset(), top_n: int = 20,
+                        channel_stats_cache: dict | None = None) -> ScopeStats:
+    """channel_stats_cache, when passed, lets a channel's shards be
+    scanned at most once per cache dict (one archive report invocation)
+    instead of once per scope that channel belongs to -- a channel is
+    always in exactly 2 scopes ("server" and its one category), so this
+    halves the shard-opening work on a full regeneration. The cache
+    bakes in excluded_author_ids at build time, which is safe only
+    because this project calls gather_scope_stats with the same
+    excluded_author_ids for every scope within one archive report
+    invocation (it comes from one Config, not per-scope)."""
     author_counts: Counter = Counter()
     word_counts: Counter = Counter()
     attachment_counts: Counter = Counter()
     total_messages = 0
 
     for channel_id in channel_ids:
-        shard_rows = catalog_conn.execute(
-            "SELECT DISTINCT shard_path FROM channel_month_shard WHERE channel_id=?",
-            (channel_id,),
-        ).fetchall()
-        for shard_row in shard_rows:
-            shard_conn = connect_shard(data_dir / shard_row["shard_path"])
-            try:
-                for row in shard_conn.execute(
-                    "SELECT author_id, content FROM messages WHERE channel_id=? AND deleted_utc IS NULL",
-                    (channel_id,),
-                ).fetchall():
-                    total_messages += 1
-                    if row["author_id"] in excluded_author_ids:
-                        continue
-                    author_counts[row["author_id"]] += 1
-                    for word in _WORD_RE.findall(row["content"].lower()):
-                        word_counts[word] += 1
+        if channel_stats_cache is not None and channel_id in channel_stats_cache:
+            ch_total, ch_authors, ch_words, ch_attachments = channel_stats_cache[channel_id]
+        else:
+            ch_total = 0
+            ch_authors: Counter = Counter()
+            ch_words: Counter = Counter()
+            ch_attachments: Counter = Counter()
+            shard_rows = catalog_conn.execute(
+                "SELECT DISTINCT shard_path FROM channel_month_shard WHERE channel_id=?",
+                (channel_id,),
+            ).fetchall()
+            for shard_row in shard_rows:
+                shard_path = data_dir / shard_row["shard_path"]
+                if not shard_path.exists():
+                    continue
+                shard_conn = connect_shard(shard_path)
+                try:
+                    for row in shard_conn.execute(
+                        "SELECT author_id, content, message_type FROM messages WHERE channel_id=? AND deleted_utc IS NULL",
+                        (channel_id,),
+                    ).fetchall():
+                        ch_total += 1
+                        if row["message_type"] == 0 and row["author_id"] not in excluded_author_ids:
+                            ch_authors[row["author_id"]] += 1
+                            content_no_urls = _URL_RE.sub("", row["content"].lower())
+                            for word in _WORD_RE.findall(content_no_urls):
+                                if word not in _STOPWORDS:
+                                    ch_words[word] += 1
+                    for att_row in shard_conn.execute(
+                        "SELECT a.content_type FROM attachments a JOIN messages m ON a.message_id = m.id "
+                        "WHERE m.channel_id=? AND m.deleted_utc IS NULL",
+                        (channel_id,),
+                    ).fetchall():
+                        ch_attachments[classify_attachment(att_row["content_type"])] += 1
+                finally:
+                    shard_conn.close()
+            if channel_stats_cache is not None:
+                channel_stats_cache[channel_id] = (ch_total, ch_authors, ch_words, ch_attachments)
 
-                for att_row in shard_conn.execute(
-                    "SELECT a.content_type FROM attachments a JOIN messages m ON a.message_id = m.id "
-                    "WHERE m.channel_id=? AND m.deleted_utc IS NULL",
-                    (channel_id,),
-                ).fetchall():
-                    attachment_counts[classify_attachment(att_row["content_type"])] += 1
-            finally:
-                shard_conn.close()
+        total_messages += ch_total
+        author_counts.update(ch_authors)
+        word_counts.update(ch_words)
+        attachment_counts.update(ch_attachments)
 
     return ScopeStats(
         total_messages=total_messages,
@@ -98,14 +145,14 @@ def gather_scope_stats(catalog_conn: sqlite3.Connection, data_dir: Path, channel
 
 
 def render_report(scope_label: str, coverage_rows: list[dict], stats: ScopeStats,
-                   newly_inaccessible: list[dict]) -> str:
+                   newly_inaccessible: list[dict], usernames: dict[str, str] | None = None) -> str:
     lines = [f"# {scope_label} report", ""]
 
     if newly_inaccessible:
         lines.append("## Newly inaccessible since the last report")
         lines.append("")
         for row in newly_inaccessible:
-            lines.append(f"- **{row.get('name', row['channel_id'])}** (id {row['channel_id']})")
+            lines.append(f"- **{_md_cell(row.get('name', row['channel_id']))}** (id {row['channel_id']})")
         lines.append("")
 
     lines.append("## Coverage")
@@ -113,9 +160,9 @@ def render_report(scope_label: str, coverage_rows: list[dict], stats: ScopeStats
     lines.append("| Channel | Type | Status | Messages | Gap reason |")
     lines.append("|---|---|---|---|---|")
     for row in coverage_rows:
-        gap = row.get("gap_reason") or ""
+        gap = _md_cell(row.get("gap_reason") or "")
         lines.append(
-            f"| {row['name']} | {row['type']} | {row['status']} | "
+            f"| {_md_cell(row['name'])} | {row['type']} | {row['status']} | "
             f"{row['message_count']} | {gap} |"
         )
     lines.append("")
@@ -138,10 +185,12 @@ def render_report(scope_label: str, coverage_rows: list[dict], stats: ScopeStats
     lines.append("## Top posters")
     lines.append("")
     if stats.top_authors:
-        lines.append("| Author ID | Messages |")
+        usernames = usernames or {}
+        lines.append("| Author | Messages |")
         lines.append("|---|---|")
         for author_id, count in stats.top_authors:
-            lines.append(f"| {author_id} | {count} |")
+            display = usernames.get(author_id, author_id)
+            lines.append(f"| {_md_cell(display)} | {count} |")
     else:
         lines.append("No data.")
     lines.append("")
@@ -158,7 +207,7 @@ def render_report(scope_label: str, coverage_rows: list[dict], stats: ScopeStats
         lines.append("| Word | Count |")
         lines.append("|---|---|")
         for word, count in stats.top_words:
-            lines.append(f"| {word} | {count} |")
+            lines.append(f"| {_md_cell(word)} | {count} |")
     else:
         lines.append("No data.")
     lines.append("")

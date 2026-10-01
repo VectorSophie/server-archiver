@@ -64,13 +64,31 @@ def is_scope_dirty(catalog_conn: sqlite3.Connection, scope: str, current_fingerp
     return row["fingerprint"] != current_fingerprint
 
 
-def mark_scope_generated(catalog_conn: sqlite3.Connection, scope: str, fingerprint: str) -> None:
+def mark_scope_generated(catalog_conn: sqlite3.Connection, scope: str, fingerprint: str,
+                          filename: str) -> None:
     catalog_conn.execute(
-        "INSERT INTO report_fingerprint (scope, fingerprint, generated_utc) VALUES (?, ?, ?) "
-        "ON CONFLICT(scope) DO UPDATE SET fingerprint=excluded.fingerprint, "
-        "generated_utc=excluded.generated_utc",
-        (scope, fingerprint, _now()),
+        "INSERT INTO report_fingerprint (scope, fingerprint, generated_utc, filename) "
+        "VALUES (?, ?, ?, ?) ON CONFLICT(scope) DO UPDATE SET fingerprint=excluded.fingerprint, "
+        "generated_utc=excluded.generated_utc, filename=excluded.filename",
+        (scope, fingerprint, _now(), filename),
     )
+    catalog_conn.commit()
+
+
+def get_previous_filename(catalog_conn: sqlite3.Connection, scope: str) -> str | None:
+    row = catalog_conn.execute(
+        "SELECT filename FROM report_fingerprint WHERE scope=?", (scope,)
+    ).fetchone()
+    return row["filename"] if row and row["filename"] else None
+
+
+def all_known_scopes(catalog_conn: sqlite3.Connection) -> dict[str, str]:
+    rows = catalog_conn.execute("SELECT scope, filename FROM report_fingerprint").fetchall()
+    return {r["scope"]: r["filename"] for r in rows}
+
+
+def forget_scope(catalog_conn: sqlite3.Connection, scope: str) -> None:
+    catalog_conn.execute("DELETE FROM report_fingerprint WHERE scope=?", (scope,))
     catalog_conn.commit()
 
 
