@@ -677,3 +677,60 @@ def test_search_disambiguates_two_users_sharing_a_display_name(tmp_path):
 
     results = search(catalog, tmp_path, "from:alex")
     assert {r["author_id"] for r in results} == {"20", "21"}  # both users' messages found, not collapsed
+
+
+def test_resolve_category_filter_matches_by_category_name_substring(tmp_path):
+    catalog = connect_catalog(tmp_path / "catalog.sqlite")
+    now = "2025-10-15T00:00:00Z"
+    catalog.execute(
+        "INSERT INTO category_names (category_id, name, updated_utc) VALUES ('cat1', 'Gaming Chat', ?)",
+        (now,),
+    )
+    catalog.execute(
+        "INSERT INTO channels (id, name, type, parent_id, category_id, is_archived, "
+        "first_seen_utc, last_seen_utc) VALUES ('10', 'games', 'text', NULL, 'cat1', 0, ?, ?)",
+        (now, now),
+    )
+    catalog.execute(
+        "INSERT INTO channels (id, name, type, parent_id, category_id, is_archived, "
+        "first_seen_utc, last_seen_utc) VALUES ('11', 'other', 'text', NULL, NULL, 0, ?, ?)",
+        (now, now),
+    )
+    catalog.commit()
+    resolved = resolve_query(catalog, tokenize_query("category:gaming"))
+    assert resolved.channel_ids == ["10"]
+
+
+def test_resolve_category_filter_uncategorized_matches_null_category(tmp_path):
+    catalog = connect_catalog(tmp_path / "catalog.sqlite")
+    now = "2025-10-15T00:00:00Z"
+    catalog.execute(
+        "INSERT INTO channels (id, name, type, parent_id, category_id, is_archived, "
+        "first_seen_utc, last_seen_utc) VALUES ('11', 'other', 'text', NULL, NULL, 0, ?, ?)",
+        (now, now),
+    )
+    catalog.commit()
+    resolved = resolve_query(catalog, tokenize_query("category:uncategorized"))
+    assert resolved.channel_ids == ["11"]
+
+
+def test_resolve_in_and_category_filters_union_their_channel_ids(tmp_path):
+    catalog = connect_catalog(tmp_path / "catalog.sqlite")
+    now = "2025-10-15T00:00:00Z"
+    catalog.execute(
+        "INSERT INTO category_names (category_id, name, updated_utc) VALUES ('cat1', 'Gaming', ?)",
+        (now,),
+    )
+    catalog.execute(
+        "INSERT INTO channels (id, name, type, parent_id, category_id, is_archived, "
+        "first_seen_utc, last_seen_utc) VALUES ('10', 'games', 'text', NULL, 'cat1', 0, ?, ?)",
+        (now, now),
+    )
+    catalog.execute(
+        "INSERT INTO channels (id, name, type, parent_id, category_id, is_archived, "
+        "first_seen_utc, last_seen_utc) VALUES ('20', 'general', 'text', NULL, NULL, 0, ?, ?)",
+        (now, now),
+    )
+    catalog.commit()
+    resolved = resolve_query(catalog, tokenize_query("in:general category:gaming"))
+    assert sorted(resolved.channel_ids) == ["10", "20"]

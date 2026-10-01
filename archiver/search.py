@@ -14,7 +14,7 @@ from archiver.db import connect_shard
 from archiver.fts import ensure_messages_fts
 from archiver.store import month_bucket
 
-_FILTER_KEYS = {"from", "in", "during", "after", "before", "has", "file", "ext"}
+_FILTER_KEYS = {"from", "in", "during", "after", "before", "has", "file", "ext", "category"}
 SEOUL = ZoneInfo("Asia/Seoul")
 HAS_VALUES = {"image", "video", "audio", "embed", "poll", "sticker", "reaction", "attachment"}
 _ISO_FMT = "%Y-%m-%dT%H:%M:%SZ"
@@ -140,6 +140,27 @@ def _resolve_channel_ids(catalog_conn, values: list[str]) -> list[str]:
     return ids
 
 
+def _resolve_category_channel_ids(catalog_conn, values: list[str]) -> list[str]:
+    ids: list[str] = []
+    for value in values:
+        if value.lower() == "uncategorized":
+            rows = catalog_conn.execute("SELECT id FROM channels WHERE category_id IS NULL").fetchall()
+            ids.extend(r["id"] for r in rows)
+            continue
+        category_ids = [value] if value.isdigit() else [
+            r["category_id"] for r in catalog_conn.execute(
+                "SELECT category_id FROM category_names WHERE LOWER(name) LIKE ? ESCAPE '\\'",
+                (f"%{_escape_like(value.lower())}%",),
+            ).fetchall()
+        ]
+        for category_id in category_ids:
+            rows = catalog_conn.execute(
+                "SELECT id FROM channels WHERE category_id=?", (category_id,)
+            ).fetchall()
+            ids.extend(r["id"] for r in rows)
+    return ids
+
+
 def _resolve_author_ids(catalog_conn, values: list[str]) -> list[str]:
     ids: list[str] = []
     for value in values:
@@ -159,7 +180,13 @@ def _resolve_author_ids(catalog_conn, values: list[str]) -> list[str]:
 def resolve_query(catalog_conn, parsed: ParsedQuery) -> ResolvedQuery:
     filters = parsed.filters
 
-    channel_ids = _resolve_channel_ids(catalog_conn, filters["in"]) if "in" in filters else None
+    channel_ids = None
+    if "in" in filters or "category" in filters:
+        channel_ids = []
+        if "in" in filters:
+            channel_ids.extend(_resolve_channel_ids(catalog_conn, filters["in"]))
+        if "category" in filters:
+            channel_ids.extend(_resolve_category_channel_ids(catalog_conn, filters["category"]))
     author_ids = _resolve_author_ids(catalog_conn, filters["from"]) if "from" in filters else None
 
     after_utc = before_utc = None
