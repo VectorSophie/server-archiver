@@ -7,6 +7,7 @@ connection for is factored into the pure `format_*` functions below,
 which the suite does cover."""
 import argparse
 import asyncio
+import getpass
 import json
 import shlex
 import sys
@@ -17,6 +18,7 @@ import discord
 
 from archiver.backfill import backfill_all_pending
 from archiver.config import load_config
+from archiver.credentials import add_user
 from archiver.db import connect_catalog
 from archiver.discovery import discover_guild
 from archiver.discord_io import load_token
@@ -590,6 +592,24 @@ def _run_restore(config, category: str, yyyymm: str, *, target: str | None = Non
         catalog_conn.close()
 
 
+def _run_serve(config, *, host: str = "127.0.0.1", port: int = 8000) -> int:
+    from archiver.webapp import create_app
+    app = create_app(config)
+    app.run(host=host, port=port, debug=False)
+    return 0
+
+
+def _run_useradd(config, codename: str) -> int:
+    password = getpass.getpass(f"Password for '{codename}': ")
+    if not password:
+        print("password cannot be empty")
+        return 1
+    credentials_path = HERE / "credentials.json"
+    add_user(codename, password, credentials_path)
+    print(f"Added/updated credentials for '{codename}'.")
+    return 0
+
+
 def main() -> int:
     if sys.stdout is None:
         _setup_background_logging()
@@ -650,6 +670,11 @@ def main() -> int:
     restore_parser.add_argument("yyyymm", help="Month, e.g. 2025-10")
     restore_parser.add_argument("--target", default=None, help="Destination directory (default: <data_dir>/restored/<category>/<yyyymm>)")
     restore_parser.add_argument("--force", action="store_true", help="Overwrite existing files at the destination")
+    serve_parser = subparsers.add_parser("serve", help="Run the private search web app")
+    serve_parser.add_argument("--host", default="127.0.0.1")
+    serve_parser.add_argument("--port", type=int, default=8000)
+    useradd_parser = subparsers.add_parser("useradd", help="Add or reset a league member's web login")
+    useradd_parser.add_argument("codename")
 
     args = parser.parse_args()
 
@@ -690,6 +715,10 @@ def main() -> int:
         return _run_verify(config, args.category, args.yyyymm)
     if args.command == "restore":
         return _run_restore(config, args.category, args.yyyymm, target=args.target, force=args.force)
+    if args.command == "serve":
+        return _run_serve(config, host=args.host, port=args.port)
+    if args.command == "useradd":
+        return _run_useradd(config, args.codename)
     parser.error(f"unknown command: {args.command}")
     return 2
 

@@ -13,6 +13,7 @@ class Config:
     guild_id: str
     data_dir: Path
     excluded_ranking_author_ids: tuple[str, ...] = ()
+    secure_cookies: bool = True
 
 
 def load_config(path: Path) -> Config:
@@ -24,4 +25,5 @@ def load_config(path: Path) -> Config:
         guild_id=str(raw["guild_id"]),
         data_dir=Path(raw["data_dir"]),
         excluded_ranking_author_ids=tuple(str(x) for x in raw.get("excluded_ranking_author_ids", [])),
+        secure_cookies=bool(raw.get("secure_cookies", True)),
     )

@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Archive // Login</title>
+<link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+<div class="login-wrap">
+  <div class="login-box">
+    <div class="brand">ARCHIVE<span class="slash">//</span>LOGIN</div>
+    <form method="post" action="/login">
+      <input type="text" name="codename" placeholder="codename" autocomplete="username" autofocus required>
+      <input type="password" name="password" placeholder="password" autocomplete="current-password" required>
+      <button type="submit">ENTER</button>
+    </form>
+    <div class="error" id="error"></div>
+  </div>
+</div>
+<script>
+  if (new URLSearchParams(window.location.search).get("failed")) {
+    document.getElementById("error").textContent = "invalid codename or password";
+  }
+</script>
+</body>
+</html>

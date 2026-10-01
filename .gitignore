@@ -5,4 +5,7 @@ __pycache__/
 .worktrees/
 .claude/
 config.json
+credentials.json
 logs/
+archiver/static/fonts/
+Gridular-Font/
