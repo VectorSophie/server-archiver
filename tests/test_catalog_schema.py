@@ -32,7 +32,7 @@ def test_connect_catalog_is_idempotent(tmp_path: Path):
     path = tmp_path / "catalog.sqlite"
     connect_catalog(path)
     conn = connect_catalog(path)  # reopening must not raise
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 3
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 4
 
 
 def test_coverage_status_check_constraint(tmp_path: Path):

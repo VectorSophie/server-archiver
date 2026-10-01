@@ -10,6 +10,7 @@ import asyncio
 import json
 import shlex
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 import discord
@@ -19,7 +20,8 @@ from archiver.config import load_config
 from archiver.db import connect_catalog
 from archiver.discovery import discover_guild
 from archiver.discord_io import load_token
-from archiver.live import apply_live_message, apply_raw_delete, apply_raw_edit, catch_up_missed_messages, rescan_recent_window
+from archiver.export import render_markdown, render_text
+from archiver.live import apply_live_message, apply_live_reaction_change, apply_live_thread_create, apply_raw_delete, apply_raw_edit, catch_up_missed_messages, rescan_recent_window, run_periodic_rediscovery_once
 from archiver.users import backfill_missing_users
 from archiver.report_state import (
     compute_scope_fingerprint, diff_newly_inaccessible, is_scope_dirty, mark_scope_generated,
@@ -27,9 +29,44 @@ from archiver.report_state import (
 )
 from archiver.reports import channels_by_scope, gather_coverage, gather_scope_stats, render_report
 from archiver.search import HAS_VALUES, format_result, get_context, search, tokenize_query
+from archiver.snapshot import create_snapshot, is_snapshot_stale, list_snapshot_scopes, restore_snapshot, verify_snapshot
 from archiver.store import ShardStore
 
 HERE = Path(__file__).parent.parent
+
+
+def _setup_background_logging() -> None:
+    """pythonw.exe (Task Scheduler runs `archive live` through it so no
+    console window appears) gives sys.stdout/sys.stderr as None -- the
+    very first print() would crash with AttributeError. Redirect both
+    to a UTF-8 log file before anything else touches them. One file per
+    calendar day, kept next to config.json so it's always writable even
+    if config.json itself fails to load."""
+    log_dir = HERE / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_path = log_dir / f"live-{datetime.now().strftime('%Y%m%d')}.log"
+    log_file = open(log_path, "a", buffering=1, encoding="utf-8")
+    sys.stdout = log_file
+    sys.stderr = log_file
+
+
+def _acquire_single_instance_lock(data_dir: Path):
+    """Prevents two `archive live` processes from writing to the same
+    shards at once -- e.g. Task Scheduler firing while a manual run is
+    still going. Returns the open lock file handle on success (keep it
+    referenced for the process lifetime; closing it releases the lock),
+    or None if another process already holds it. Windows-only, like the
+    rest of this project's Stage 8 deployment story."""
+    import msvcrt
+    data_dir.mkdir(parents=True, exist_ok=True)
+    lock_path = data_dir / ".live.lock"
+    lock_file = open(lock_path, "a+")
+    try:
+        msvcrt.locking(lock_file.fileno(), msvcrt.LK_NBLCK, 1)
+    except OSError:
+        lock_file.close()
+        return None
+    return lock_file
 
 
 def format_doctor_report(username, user_id, message_content_intent,
@@ -211,10 +248,16 @@ async def _run_live(config) -> int:
     client = discord.Client(intents=intents)
     caught_up_channels: set[str] = set()
     backfill_task: asyncio.Task | None = None
+    rediscovery_task: asyncio.Task | None = None
+
+    async def _periodic_rediscovery_loop(interval_seconds: int = 1800) -> None:
+        while True:
+            await asyncio.sleep(interval_seconds)
+            await run_periodic_rediscovery_once(client, config.guild_id, catalog_conn)
 
     @client.event
     async def on_ready():
-        nonlocal backfill_task
+        nonlocal backfill_task, rediscovery_task
         guild = client.get_guild(int(config.guild_id))
         if guild is None:
             print(f"live capture failed: configured guild id {config.guild_id} not found")
@@ -226,6 +269,8 @@ async def _run_live(config) -> int:
             await rescan_recent_window(client, catalog_conn, store)
             if backfill_task is None or backfill_task.done():
                 backfill_task = asyncio.create_task(backfill_all_pending(client, catalog_conn, store))
+            if rediscovery_task is None or rediscovery_task.done():
+                rediscovery_task = asyncio.create_task(_periodic_rediscovery_loop())
             # After, not before, kicking off backfill: a network error in the
             # user-catch-up sweep must not delay backfill starting until the
             # next reconnect (reviewer-found scenario -- the sweep only
@@ -250,6 +295,10 @@ async def _run_live(config) -> int:
         apply_live_message(store, catalog_conn, message, advance_checkpoint=advance)
 
     @client.event
+    async def on_thread_create(thread):
+        apply_live_thread_create(catalog_conn, thread)
+
+    @client.event
     async def on_raw_message_edit(payload):
         apply_raw_edit(store, catalog_conn, str(payload.channel_id), payload.data)
 
@@ -261,6 +310,14 @@ async def _run_live(config) -> int:
     async def on_raw_bulk_message_delete(payload):
         for message_id in payload.message_ids:
             apply_raw_delete(store, catalog_conn, str(payload.channel_id), message_id)
+
+    @client.event
+    async def on_raw_reaction_add(payload):
+        await apply_live_reaction_change(client, store, catalog_conn, payload.channel_id, payload.message_id)
+
+    @client.event
+    async def on_raw_reaction_remove(payload):
+        await apply_live_reaction_change(client, store, catalog_conn, payload.channel_id, payload.message_id)
 
     token = load_token(HERE / ".env")
     try:
@@ -438,7 +495,104 @@ def _run_report(config, *, force: bool = False) -> int:
         catalog_conn.close()
 
 
+def _run_export(config, raw_query: str, *, fmt: str = "txt", output: str | None = None) -> int:
+    catalog_conn = connect_catalog(config.data_dir / "catalog.sqlite")
+    try:
+        results = search(catalog_conn, config.data_dir, raw_query, limit=10**9)
+        if not results:
+            print("No results.")
+            return 0
+
+        if fmt == "json":
+            text = json.dumps(results, ensure_ascii=False, indent=2, default=str)
+        elif fmt == "md":
+            text = render_markdown(catalog_conn, results)
+        else:
+            text = render_text(catalog_conn, results)
+
+        if output:
+            out_path = Path(output)
+        else:
+            safe_query = "".join(c if c.isalnum() or c in "-_" else "_" for c in raw_query).strip("_") or "export"
+            timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+            out_path = Path(f"export-{safe_query}-{timestamp}.{fmt}")
+
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(text, encoding="utf-8")
+        print(f"Exported {len(results)} message(s) to {out_path}")
+        return 0
+    finally:
+        catalog_conn.close()
+
+
+def _run_snapshot(config, *, force: bool = False) -> int:
+    catalog_conn = connect_catalog(config.data_dir / "catalog.sqlite")
+    try:
+        current_month = datetime.now(timezone.utc).strftime("%Y-%m")
+        snapshots_dir = config.data_dir / "snapshots"
+        created, skipped = [], []
+        for category_id, yyyymm in list_snapshot_scopes(catalog_conn):
+            if not force and not is_snapshot_stale(catalog_conn, config.data_dir, category_id, yyyymm):
+                skipped.append(f"{category_id}/{yyyymm}")
+                continue
+            create_snapshot(catalog_conn, config.data_dir, category_id, yyyymm, snapshots_dir,
+                             is_current_month=(yyyymm == current_month))
+            created.append(f"{category_id}/{yyyymm}")
+
+        if created:
+            print(f"Snapshotted: {', '.join(created)}")
+        if skipped:
+            print(f"Skipped (unchanged): {len(skipped)} scope(s)")
+        if not created and not skipped:
+            print("No shards discovered yet -- nothing to snapshot.")
+        return 0
+    finally:
+        catalog_conn.close()
+
+
+def _run_verify(config, category: str, yyyymm: str) -> int:
+    catalog_conn = connect_catalog(config.data_dir / "catalog.sqlite")
+    try:
+        row = catalog_conn.execute(
+            "SELECT tarball_path FROM snapshots WHERE category=? AND yyyymm=?", (category, yyyymm)
+        ).fetchone()
+        if row is None:
+            print(f"No snapshot found for {category}/{yyyymm}.")
+            return 1
+        result = verify_snapshot(config.data_dir, row["tarball_path"])
+        print(f"sha256: {'OK' if result['sha256_ok'] else 'MISMATCH'}")
+        print(f"integrity: {'OK' if result['integrity_ok'] else 'FAILED'}")
+        for name, ok in result["shard_results"].items():
+            print(f"  {name}: {'ok' if ok else 'CORRUPT'}")
+        return 0 if (result["sha256_ok"] and result["integrity_ok"]) else 1
+    finally:
+        catalog_conn.close()
+
+
+def _run_restore(config, category: str, yyyymm: str, *, target: str | None = None, force: bool = False) -> int:
+    catalog_conn = connect_catalog(config.data_dir / "catalog.sqlite")
+    try:
+        row = catalog_conn.execute(
+            "SELECT tarball_path FROM snapshots WHERE category=? AND yyyymm=?", (category, yyyymm)
+        ).fetchone()
+        if row is None:
+            print(f"No snapshot found for {category}/{yyyymm}.")
+            return 1
+        target_dir = Path(target) if target else None
+        try:
+            result = restore_snapshot(config.data_dir, row["tarball_path"], target_dir=target_dir, force=force)
+        except (ValueError, FileExistsError) as exc:
+            print(f"Restore refused: {exc}")
+            return 1
+        print(f"Restored to {result['restored_to']}")
+        return 0
+    finally:
+        catalog_conn.close()
+
+
 def main() -> int:
+    if sys.stdout is None:
+        _setup_background_logging()
     sys.stdout.reconfigure(encoding="utf-8")
     parser = argparse.ArgumentParser(prog="archive")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -469,6 +623,33 @@ def main() -> int:
     subparsers.add_parser("live")
     report_parser = subparsers.add_parser("report")
     report_parser.add_argument("--force", action="store_true")
+    export_parser = subparsers.add_parser(
+        "export",
+        help="Export search results to a file (no result cap, unlike find)",
+        description=(
+            "Export every message matching a query (same filter grammar as find: "
+            "from:/in:/category:/during:/after:/before:/has:/file:/ext:) to a file. "
+            "Unlike find, there is no result cap -- this is for bulk extraction, not "
+            "interactive search."
+        ),
+    )
+    export_parser.add_argument("query", nargs="+", help="Search terms and filters")
+    export_parser.add_argument("--format", choices=["txt", "md", "json"], default="txt",
+                                dest="export_format", help="Output format (default: txt)")
+    export_parser.add_argument("--output", default=None, help="Output file path (default: auto-named)")
+    snapshot_parser = subparsers.add_parser(
+        "snapshot",
+        help="Create point-in-time snapshots of shard files that changed since their last snapshot",
+    )
+    snapshot_parser.add_argument("--force", action="store_true", help="Re-snapshot every scope, even unchanged ones")
+    verify_parser = subparsers.add_parser("verify", help="Verify a snapshot's integrity (sha256 + PRAGMA integrity_check)")
+    verify_parser.add_argument("category", help="Category id")
+    verify_parser.add_argument("yyyymm", help="Month, e.g. 2025-10")
+    restore_parser = subparsers.add_parser("restore", help="Restore a snapshot's shard files to a directory")
+    restore_parser.add_argument("category", help="Category id")
+    restore_parser.add_argument("yyyymm", help="Month, e.g. 2025-10")
+    restore_parser.add_argument("--target", default=None, help="Destination directory (default: <data_dir>/restored/<category>/<yyyymm>)")
+    restore_parser.add_argument("--force", action="store_true", help="Overwrite existing files at the destination")
 
     args = parser.parse_args()
 
@@ -490,9 +671,25 @@ def main() -> int:
         return _run_find(config, raw_query, full=args.full, context=args.context,
                          json_output=args.json_output)
     if args.command == "live":
-        return asyncio.run(_run_live(config))
+        lock = _acquire_single_instance_lock(config.data_dir)
+        if lock is None:
+            print("archive live is already running (lock held) -- exiting.")
+            return 1
+        try:
+            return asyncio.run(_run_live(config))
+        finally:
+            lock.close()
     if args.command == "report":
         return _run_report(config, force=args.force)
+    if args.command == "export":
+        raw_query = shlex.join(args.query)
+        return _run_export(config, raw_query, fmt=args.export_format, output=args.output)
+    if args.command == "snapshot":
+        return _run_snapshot(config, force=args.force)
+    if args.command == "verify":
+        return _run_verify(config, args.category, args.yyyymm)
+    if args.command == "restore":
+        return _run_restore(config, args.category, args.yyyymm, target=args.target, force=args.force)
     parser.error(f"unknown command: {args.command}")
     return 2
 

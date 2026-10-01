@@ -12,7 +12,9 @@ from datetime import datetime, timedelta, timezone
 
 import discord
 
+from archiver.discord_io import classify_channel_type
 from archiver.discord_message import map_message
+from archiver.discovery import discover_guild
 from archiver.store import ShardStore, write_message
 from archiver.users import map_author, upsert_user
 
@@ -225,3 +227,82 @@ async def rescan_recent_window(client, catalog_conn: sqlite3.Connection, store: 
                     raise
         except Exception:
             continue
+
+
+def apply_live_thread_create(catalog_conn: sqlite3.Connection, thread) -> None:
+    """A thread/forum post created during a live session is tracked
+    immediately rather than only on the next restart's full discovery
+    sweep (a previously documented gap) -- mirrors discovery.py's
+    per-channel upsert, scoped to one new thread. status starts
+    'pending', picked up by the next backfill_all_pending sweep."""
+    channel_id = str(thread.id)
+    parent_id = str(thread.parent_id) if thread.parent_id else None
+    category_id = None
+    if parent_id is not None:
+        parent_row = catalog_conn.execute(
+            "SELECT category_id FROM channels WHERE id=?", (parent_id,)
+        ).fetchone()
+        category_id = parent_row["category_id"] if parent_row else None
+    kind = classify_channel_type(thread)
+    now = _now()
+
+    existing = catalog_conn.execute("SELECT 1 FROM channels WHERE id=?", (channel_id,)).fetchone()
+    catalog_conn.execute(
+        "INSERT INTO channels (id, name, type, parent_id, category_id, is_archived, "
+        "first_seen_utc, last_seen_utc) VALUES (?, ?, ?, ?, ?, 0, ?, ?) "
+        "ON CONFLICT(id) DO UPDATE SET name=excluded.name, last_seen_utc=excluded.last_seen_utc",
+        (channel_id, thread.name, kind, parent_id, category_id, now, now),
+    )
+    if existing is None:
+        catalog_conn.execute(
+            "INSERT INTO coverage (channel_id, status) VALUES (?, 'pending') "
+            "ON CONFLICT(channel_id) DO NOTHING",
+            (channel_id,),
+        )
+    catalog_conn.commit()
+
+
+async def apply_live_reaction_change(client, store: ShardStore, catalog_conn: sqlite3.Connection,
+                                       channel_id, message_id) -> None:
+    """A raw reaction add/remove event carries only who changed what,
+    never the message's current aggregate reaction counts -- the only
+    way to get an authoritative count (spec: aggregate only, no
+    per-reactor lists) is to re-fetch the message and re-map it through
+    the same idempotent write_message pipeline every other message
+    write uses. Never advances live_checkpoint/message_count -- this
+    re-syncs an existing message, it never creates one."""
+    channel_id = str(channel_id)
+    if not _is_tracked_channel(catalog_conn, channel_id):
+        return
+    try:
+        discord_channel = await client.fetch_channel(int(channel_id))
+    except Exception:
+        return
+    if not hasattr(discord_channel, "fetch_message"):
+        return
+    try:
+        message = await discord_channel.fetch_message(int(message_id))
+    except Exception:
+        return
+
+    mapped = map_message(message)
+    shard_conn = store.get_shard(channel_id, message.created_at)
+    try:
+        write_message(shard_conn, mapped)
+        shard_conn.commit()
+    except BaseException:
+        shard_conn.rollback()
+        raise
+
+
+async def run_periodic_rediscovery_once(client, guild_id: str, catalog_conn: sqlite3.Connection) -> None:
+    """One periodic re-discovery pass, factored out of the sleep loop
+    in _run_live so it's independently testable. Isolates any failure
+    -- a bad pass must not kill the periodic task or the live daemon."""
+    guild = client.get_guild(int(guild_id))
+    if guild is None:
+        return
+    try:
+        await discover_guild(guild, catalog_conn)
+    except Exception:
+        pass

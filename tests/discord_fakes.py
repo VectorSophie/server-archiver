@@ -216,6 +216,12 @@ class FakeHistoryChannel:
         for m in remaining[:limit]:
             yield m
 
+    async def fetch_message(self, message_id: int):
+        for m in self._messages:
+            if m.id == message_id:
+                return m
+        raise discord.NotFound(FakeResponse(), "Unknown Message")
+
 
 class FakeClient:
     """A minimal Client double for backfill_all_pending: maps channel id
@@ -223,11 +229,16 @@ class FakeClient:
     supports fetch_user for backfill_missing_users, via the same
     id -> (user object or exception) mapping style."""
     def __init__(self, channels: dict | None = None, errors: dict | None = None,
-                 users: dict | None = None, user_errors: dict | None = None):
+                 users: dict | None = None, user_errors: dict | None = None,
+                 guild=None):
         self._channels = channels or {}
         self._errors = errors or {}
         self._users = users or {}
         self._user_errors = user_errors or {}
+        self._guild = guild
+
+    def get_guild(self, guild_id: int):
+        return self._guild
 
     async def fetch_channel(self, channel_id: int):
         if channel_id in self._errors:

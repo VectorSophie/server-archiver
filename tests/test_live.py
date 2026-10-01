@@ -504,3 +504,138 @@ async def test_rescan_recent_window_isolates_one_channels_http_error_from_the_re
     shard = store.get_shard("2", CREATED)
     row = shard.execute("SELECT content FROM messages WHERE id='101'").fetchone()
     assert row["content"] == "still reapplied"
+
+
+from archiver.live import apply_live_thread_create
+from tests.discord_fakes import FakeThread
+
+
+def test_apply_live_thread_create_adds_channel_and_pending_coverage_row(tmp_path):
+    catalog = connect_catalog(tmp_path / "catalog.sqlite")
+    _seed_channel(catalog)  # seeds channel "1" as the thread's parent
+    thread = FakeThread(id=999, name="new thread", parent_id=1)
+
+    apply_live_thread_create(catalog, thread)
+
+    channel_row = catalog.execute("SELECT name, type, parent_id FROM channels WHERE id='999'").fetchone()
+    assert channel_row["name"] == "new thread"
+    assert channel_row["type"] == "public_thread"
+    assert channel_row["parent_id"] == "1"
+    coverage_row = catalog.execute("SELECT status FROM coverage WHERE channel_id='999'").fetchone()
+    assert coverage_row["status"] == "pending"
+
+
+def test_apply_live_thread_create_inherits_parent_category(tmp_path):
+    catalog = connect_catalog(tmp_path / "catalog.sqlite")
+    _seed_channel(catalog, channel_id="1", category_id="cat1")
+    thread = FakeThread(id=999, name="new thread", parent_id=1)
+
+    apply_live_thread_create(catalog, thread)
+
+    row = catalog.execute("SELECT category_id FROM channels WHERE id='999'").fetchone()
+    assert row["category_id"] == "cat1"
+
+
+def test_apply_live_thread_create_is_idempotent_on_replay(tmp_path):
+    catalog = connect_catalog(tmp_path / "catalog.sqlite")
+    _seed_channel(catalog)
+    thread = FakeThread(id=999, name="new thread", parent_id=1)
+
+    apply_live_thread_create(catalog, thread)
+    apply_live_thread_create(catalog, thread)  # e.g. a duplicate gateway event
+
+    rows = catalog.execute("SELECT 1 FROM coverage WHERE channel_id='999'").fetchall()
+    assert len(rows) == 1  # not duplicated, and status stays 'pending' not reset
+
+
+from archiver.live import apply_live_reaction_change
+from tests.discord_fakes import FakeHistoryChannel, FakeClient, FakeReaction
+
+
+async def test_apply_live_reaction_change_refetches_and_updates_reaction_count(tmp_path):
+    catalog = connect_catalog(tmp_path / "catalog.sqlite")
+    _seed_channel(catalog)
+    catalog.execute("UPDATE coverage SET status='complete' WHERE channel_id='1'")
+    catalog.commit()
+    store = ShardStore(tmp_path, catalog)
+
+    msg = FakeMessage(id=100, channel_id=1, author_id=2, content="hi", created_at=CREATED,
+                       reactions=[FakeReaction("\N{THUMBS UP SIGN}", count=3)])
+    channel = FakeHistoryChannel(id=1, messages=[msg])
+    client = FakeClient(channels={1: channel})
+
+    await apply_live_reaction_change(client, store, catalog, "1", 100)
+
+    shard = store.get_shard("1", CREATED)
+    row = shard.execute("SELECT count FROM reactions WHERE message_id='100'").fetchone()
+    assert row["count"] == 3
+
+
+async def test_apply_live_reaction_change_never_touches_live_checkpoint(tmp_path):
+    catalog = connect_catalog(tmp_path / "catalog.sqlite")
+    _seed_channel(catalog)
+    catalog.execute(
+        "UPDATE coverage SET status='complete', live_checkpoint='50' WHERE channel_id='1'"
+    )
+    catalog.commit()
+    store = ShardStore(tmp_path, catalog)
+
+    msg = FakeMessage(id=100, channel_id=1, author_id=2, content="hi", created_at=CREATED)
+    channel = FakeHistoryChannel(id=1, messages=[msg])
+    client = FakeClient(channels={1: channel})
+
+    await apply_live_reaction_change(client, store, catalog, "1", 100)
+
+    row = catalog.execute("SELECT live_checkpoint FROM coverage WHERE channel_id='1'").fetchone()
+    assert row["live_checkpoint"] == "50"  # unchanged despite message id 100 > 50
+
+
+async def test_apply_live_reaction_change_isolates_a_message_fetch_failure(tmp_path):
+    catalog = connect_catalog(tmp_path / "catalog.sqlite")
+    _seed_channel(catalog)
+    catalog.execute("UPDATE coverage SET status='complete' WHERE channel_id='1'")
+    catalog.commit()
+    store = ShardStore(tmp_path, catalog)
+
+    channel = FakeHistoryChannel(id=1, messages=[])  # message 100 doesn't exist -> fetch_message raises NotFound
+    client = FakeClient(channels={1: channel})
+
+    await apply_live_reaction_change(client, store, catalog, "1", 100)  # must not raise
+
+
+from archiver.discovery import discover_guild
+from archiver.live import run_periodic_rediscovery_once
+from tests.discord_fakes import FakeChannel, FakeGuild
+
+
+async def test_run_periodic_rediscovery_once_runs_discover_guild(tmp_path):
+    catalog = connect_catalog(tmp_path / "catalog.sqlite")
+    channel = FakeChannel(id=1, name="general", type_=discord.ChannelType.text)
+    guild = FakeGuild([channel])
+    client = FakeClient(guild=guild)
+
+    await run_periodic_rediscovery_once(client, "999", catalog)
+
+    row = catalog.execute("SELECT 1 FROM channels WHERE id='1'").fetchone()
+    assert row is not None
+
+
+async def test_run_periodic_rediscovery_once_no_guild_does_not_raise(tmp_path):
+    catalog = connect_catalog(tmp_path / "catalog.sqlite")
+    client = FakeClient(guild=None)
+
+    await run_periodic_rediscovery_once(client, "999", catalog)  # must not raise
+
+
+async def test_run_periodic_rediscovery_once_isolates_a_discover_guild_failure(tmp_path, monkeypatch):
+    import archiver.live as live_module
+
+    catalog = connect_catalog(tmp_path / "catalog.sqlite")
+    guild = FakeGuild([])
+    client = FakeClient(guild=guild)
+
+    async def _raise(*args, **kwargs):
+        raise RuntimeError("boom")
+    monkeypatch.setattr(live_module, "discover_guild", _raise)
+
+    await run_periodic_rediscovery_once(client, "999", catalog)  # must not raise

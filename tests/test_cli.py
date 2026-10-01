@@ -210,3 +210,18 @@ def test_run_report_case_only_rename_does_not_delete_the_report_it_just_wrote(tm
     category_reports = list((data_dir / "reports").glob("Y*-cat1.md"))
     assert len(category_reports) == 1  # the report must still exist, not have been deleted
     assert category_reports[0].read_text(encoding="utf-8").startswith("# YURI")
+
+
+def test_acquire_single_instance_lock_blocks_a_second_caller(tmp_path):
+    from archiver.cli import _acquire_single_instance_lock
+
+    first = _acquire_single_instance_lock(tmp_path)
+    assert first is not None
+
+    second = _acquire_single_instance_lock(tmp_path)
+    assert second is None
+
+    first.close()
+    third = _acquire_single_instance_lock(tmp_path)
+    assert third is not None
+    third.close()
