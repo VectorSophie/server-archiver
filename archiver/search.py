@@ -5,6 +5,7 @@ already-archived data (spec §7)."""
 import re
 import shlex
 import sqlite3
+from collections import Counter
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -12,6 +13,7 @@ from zoneinfo import ZoneInfo
 
 from archiver.db import connect_shard
 from archiver.fts import ensure_messages_fts
+from archiver.reports import _STOPWORDS, _URL_RE, _WORD_RE
 from archiver.store import month_bucket
 
 _FILTER_KEYS = {"from", "in", "during", "after", "before", "has", "file", "ext", "category"}
@@ -408,3 +410,38 @@ def format_result(catalog_conn, row: dict, *, full: bool = False) -> str:
         .strftime("%Y-%m-%d %H:%M:%S KST")
     )
     return f"[{created_local}] #{channel_name} {author_name}: {content}"
+
+
+def query_stats(results: list[dict], *, top_n: int = 5) -> dict:
+    """Summary stats for a search result set -- count, date span,
+    rough frequency, and top words -- for display under the web UI's
+    search bar. Reuses report.py's word regex/stopword list rather
+    than redefining them; this is the same "top words" idea as
+    gather_scope_stats, just computed over an arbitrary query's
+    results instead of a whole channel/category scope."""
+    if not results:
+        return {"count": 0, "date_span": "--", "frequency": "--", "top_words": []}
+
+    dates = sorted(
+        datetime.strptime(r["created_utc"], _ISO_FMT).date() for r in results
+    )
+    first, last = dates[0], dates[-1]
+    date_span = str(first) if first == last else f"{first} - {last}"
+
+    span_days = max((last - first).days, 1)
+    rate = len(results) / span_days
+    frequency = f"~{rate:.1f}/day" if rate < 10 else f"~{rate:.0f}/day"
+
+    word_counts: Counter = Counter()
+    for r in results:
+        content_no_urls = _URL_RE.sub("", r["content"].lower())
+        for word in _WORD_RE.findall(content_no_urls):
+            if word not in _STOPWORDS:
+                word_counts[word] += 1
+
+    return {
+        "count": len(results),
+        "date_span": date_span,
+        "frequency": frequency,
+        "top_words": word_counts.most_common(top_n),
+    }

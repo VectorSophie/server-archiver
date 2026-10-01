@@ -19,6 +19,55 @@ body {
 a { color: #8a8a8a; text-decoration: none; }
 a:hover { color: #cfcfcf; }
 
+/* Ambient background: decorative only, never intercepts clicks. */
+.bg-lanes {
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  overflow: hidden;
+  pointer-events: none;
+  filter: blur(0.5px);
+}
+.lane-row {
+  position: absolute;
+  left: 0;
+  width: 100%;
+  opacity: 0.05;
+  font-size: 13px;
+  letter-spacing: 2px;
+  color: var(--accent, #5fd38d);
+  white-space: nowrap;
+}
+.lane-row:nth-child(1) { top: 90px; }
+.lane-row:nth-child(2) { top: 220px; }
+.lane-row:nth-child(3) { top: 350px; }
+.lane-row:nth-child(4) { top: 480px; }
+.lane-row:nth-child(5) { top: 610px; }
+.lane { display: inline-block; width: 200%; }
+@keyframes drift-left { from { transform: translateX(0); } to { transform: translateX(-50%); } }
+@keyframes drift-right { from { transform: translateX(-50%); } to { transform: translateX(0); } }
+.lane-left { animation: drift-left 60s linear infinite; }
+.lane-right { animation: drift-right 70s linear infinite; }
+
+.page { position: relative; z-index: 1; min-height: 100vh; display: flex; flex-direction: column; }
+
+/* Typewriter status line, a small complementary accent next to the operator badge. */
+.typewriter {
+  font-size: 11px;
+  color: #4a4a4a;
+  min-width: 1px;
+}
+.typewriter::after {
+  content: "";
+  display: inline-block;
+  width: 6px;
+  height: 11px;
+  margin-left: 2px;
+  background: #4a4a4a;
+  animation: blink 1s step-end infinite;
+  vertical-align: text-bottom;
+}
+
 .topbar {
   display: flex;
   align-items: center;
@@ -66,22 +115,80 @@ a:hover { color: #cfcfcf; }
   letter-spacing: 1px;
 }
 
+@keyframes blink { 0%, 49% { opacity: 1; } 50%, 100% { opacity: 0; } }
+@keyframes spin { to { transform: rotate(360deg); } }
+.cursor {
+  display: inline-block;
+  width: 8px;
+  height: 16px;
+  background: #f2f2f2;
+  animation: blink 1s step-end infinite;
+}
+.spinner {
+  display: inline-block;
+  width: 14px;
+  height: 14px;
+  border: 2px solid #2a2a2a;
+  border-top-color: var(--accent, #5fd38d);
+  border-radius: 50%;
+  animation: spin 0.6s linear infinite;
+}
+
+.download-btn {
+  background: transparent;
+  border: 1px solid #2a2a2a;
+  color: #4a4a4a;
+  font-family: inherit;
+  font-size: 12px;
+  padding: 0 16px;
+  border-radius: 4px;
+  cursor: default;
+  letter-spacing: 1px;
+}
+.download-btn:not(:disabled) {
+  color: var(--accent, #5fd38d);
+  cursor: pointer;
+}
+
+.stats {
+  max-width: 760px;
+  margin: 0 auto;
+  width: calc(100% - 64px);
+  display: flex;
+  background: #0a0a0a;
+  border: 1px solid #1f1f1f;
+  border-radius: 4px;
+  overflow: hidden;
+  margin-bottom: 20px;
+}
+.stat-cell { flex: 1; padding: 12px 16px; border-right: 1px solid #1f1f1f; }
+.stat-cell:last-child { border-right: none; }
+.stat-words { flex: 2; }
+.stat-label { font-size: 10px; color: #5a5a5a; letter-spacing: 1px; }
+.stat-value { font-size: 13px; color: #d8d8d8; margin-top: 4px; }
+.stat-value.accent { font-size: 18px; color: var(--accent, #5fd38d); margin-top: 2px; }
+
 .meta { padding: 0 32px; max-width: 760px; margin: 0 auto; width: 100%; box-sizing: border-box; font-size: 12px; color: #5a5a5a; padding-bottom: 8px; }
 
 .results-wrap { padding: 0 32px 48px; display: flex; justify-content: center; }
 .results { width: 100%; max-width: 760px; display: flex; flex-direction: column; }
 
-@keyframes line-in {
-  from { opacity: 0; transform: translateY(4px); }
-  to { opacity: 1; transform: translateY(0); }
+@keyframes line-in-left {
+  from { opacity: 0; transform: translateX(-16px); }
+  to { opacity: 1; transform: translateX(0); }
+}
+@keyframes line-in-right {
+  from { opacity: 0; transform: translateX(16px); }
+  to { opacity: 1; transform: translateX(0); }
 }
 .row {
   padding: 10px 2px;
   border-bottom: 1px solid #141414;
-  animation: line-in 0.2s ease-out both;
+  animation: line-in-left 0.2s ease-out both;
   font-size: 14px;
   line-height: 1.5;
 }
+.row.row-r { animation-name: line-in-right; }
 .row .head { display: flex; gap: 10px; align-items: baseline; flex-wrap: wrap; }
 .row .time { color: #5a5a5a; }
 .row .channel { color: var(--accent, #5fd38d); }

@@ -734,3 +734,58 @@ def test_resolve_in_and_category_filters_union_their_channel_ids(tmp_path):
     catalog.commit()
     resolved = resolve_query(catalog, tokenize_query("in:general category:gaming"))
     assert sorted(resolved.channel_ids) == ["10", "20"]
+
+
+def test_query_stats_empty_results():
+    from archiver.search import query_stats
+    stats = query_stats([])
+    assert stats["count"] == 0
+    assert stats["date_span"] == "--"
+    assert stats["frequency"] == "--"
+    assert stats["top_words"] == []
+
+
+def test_query_stats_counts_and_date_span():
+    from archiver.search import query_stats
+    results = [
+        {"created_utc": "2025-09-14T21:02:00Z", "content": "pizza night again"},
+        {"created_utc": "2025-09-21T12:11:00Z", "content": "pizza again? we just had it"},
+    ]
+    stats = query_stats(results)
+    assert stats["count"] == 2
+    assert stats["date_span"] == "2025-09-14 - 2025-09-21"
+
+
+def test_query_stats_single_day_span_shows_one_date():
+    from archiver.search import query_stats
+    results = [
+        {"created_utc": "2025-09-14T21:02:00Z", "content": "a"},
+        {"created_utc": "2025-09-14T21:05:00Z", "content": "b"},
+    ]
+    stats = query_stats(results)
+    assert stats["date_span"] == "2025-09-14"
+
+
+def test_query_stats_top_words_excludes_stopwords_and_urls():
+    from archiver.search import query_stats
+    results = [
+        {"created_utc": "2025-09-14T00:00:00Z", "content": "the pizza is the best pizza"},
+        {"created_utc": "2025-09-14T00:00:00Z", "content": "check https://example.com/pizza for pizza"},
+    ]
+    stats = query_stats(results)
+    words = dict(stats["top_words"])
+    assert words["pizza"] == 3  # the embedded "pizza" inside the URL is stripped along with it
+    assert "the" not in words
+    assert "https" not in words
+    assert "example" not in words  # URL stripped entirely, not just the scheme
+
+
+def test_query_stats_frequency_is_rate_per_day_over_the_span():
+    from archiver.search import query_stats
+    results = [
+        {"created_utc": f"2025-09-{day:02d}T00:00:00Z", "content": "hi"}
+        for day in range(1, 8)  # 7 messages across a 7-day span (6-day span: 1st to 7th)
+    ]
+    stats = query_stats(results)
+    assert stats["count"] == 7
+    assert "/day" in stats["frequency"]

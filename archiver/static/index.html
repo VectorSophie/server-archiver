@@ -7,38 +7,56 @@
 <link rel="stylesheet" href="/static/app.css">
 </head>
 <body>
-<div class="topbar">
-  <div class="brand">ARCHIVE<span class="slash">//</span>LEAGUE SEARCH</div>
-  <div class="operator">
-    <span class="dot"></span>
-    <span id="operator-name"></span>
-    <span>|</span>
-    <a href="/logout">sign out</a>
-  </div>
+<div class="bg-lanes" aria-hidden="true">
+  <div class="lane-row"><div class="lane lane-left">2025-10-01T13:21:50Z&nbsp;&nbsp;a3f9c2&nbsp;&nbsp;#general&nbsp;&nbsp;2025-10-01T13:22:04Z&nbsp;&nbsp;7b1e90&nbsp;&nbsp;#voice-chat&nbsp;&nbsp;2025-10-01T13:22:11Z&nbsp;&nbsp;e4d801&nbsp;&nbsp;2025-10-01T13:21:50Z&nbsp;&nbsp;a3f9c2&nbsp;&nbsp;#general&nbsp;&nbsp;2025-10-01T13:22:04Z&nbsp;&nbsp;7b1e90&nbsp;&nbsp;#voice-chat&nbsp;&nbsp;2025-10-01T13:22:11Z&nbsp;&nbsp;e4d801&nbsp;&nbsp;</div></div>
+  <div class="lane-row"><div class="lane lane-right">#tous-les-memes&nbsp;&nbsp;f02c7a&nbsp;&nbsp;2025-09-29T09:14:02Z&nbsp;&nbsp;9931bd&nbsp;&nbsp;#food-chat&nbsp;&nbsp;2025-09-29T09:15:19Z&nbsp;&nbsp;2c88e1&nbsp;&nbsp;#tous-les-memes&nbsp;&nbsp;f02c7a&nbsp;&nbsp;2025-09-29T09:14:02Z&nbsp;&nbsp;9931bd&nbsp;&nbsp;#food-chat&nbsp;&nbsp;2025-09-29T09:15:19Z&nbsp;&nbsp;2c88e1&nbsp;&nbsp;</div></div>
+  <div class="lane-row"><div class="lane lane-left">0x4f2a&nbsp;&nbsp;0x9c01&nbsp;&nbsp;0xab33&nbsp;&nbsp;#general&nbsp;&nbsp;0x77de&nbsp;&nbsp;0x1120&nbsp;&nbsp;0xf9a4&nbsp;&nbsp;#voice-chat&nbsp;&nbsp;0x3b67&nbsp;&nbsp;0x8821&nbsp;&nbsp;0xd902&nbsp;&nbsp;0x5e14&nbsp;&nbsp;0x4f2a&nbsp;&nbsp;0x9c01&nbsp;&nbsp;0xab33&nbsp;&nbsp;#general&nbsp;&nbsp;0x77de&nbsp;&nbsp;0x1120&nbsp;&nbsp;0xf9a4&nbsp;&nbsp;#voice-chat&nbsp;&nbsp;0x3b67&nbsp;&nbsp;0x8821&nbsp;&nbsp;0xd902&nbsp;&nbsp;0x5e14&nbsp;&nbsp;</div></div>
+  <div class="lane-row"><div class="lane lane-right">[sync]&nbsp;879&nbsp;files&nbsp;&nbsp;[sync]&nbsp;0&nbsp;changed&nbsp;&nbsp;[snapshot]&nbsp;ok&nbsp;&nbsp;[verify]&nbsp;sha256&nbsp;ok&nbsp;&nbsp;[restore]&nbsp;ok&nbsp;&nbsp;[coverage]&nbsp;complete&nbsp;&nbsp;[sync]&nbsp;879&nbsp;files&nbsp;&nbsp;[sync]&nbsp;0&nbsp;changed&nbsp;&nbsp;[snapshot]&nbsp;ok&nbsp;&nbsp;[verify]&nbsp;sha256&nbsp;ok&nbsp;&nbsp;[restore]&nbsp;ok&nbsp;&nbsp;[coverage]&nbsp;complete&nbsp;&nbsp;</div></div>
+  <div class="lane-row"><div class="lane lane-left">#general&nbsp;&nbsp;#tous-les-memes&nbsp;&nbsp;#cellar&nbsp;&nbsp;#voice-chat&nbsp;&nbsp;#food-chat&nbsp;&nbsp;#general&nbsp;&nbsp;#cellar&nbsp;&nbsp;#tous-les-memes&nbsp;&nbsp;#general&nbsp;&nbsp;#tous-les-memes&nbsp;&nbsp;#cellar&nbsp;&nbsp;#voice-chat&nbsp;&nbsp;#food-chat&nbsp;&nbsp;#general&nbsp;&nbsp;#cellar&nbsp;&nbsp;#tous-les-memes&nbsp;&nbsp;</div></div>
 </div>
 
-<div class="search-wrap">
-  <form id="search-form" class="search-bar">
-    <span class="prompt">&gt;</span>
-    <input type="text" id="query" name="query" placeholder="from:milkika in:general after:2025-09-01" autofocus>
-    <button type="submit">SEARCH</button>
-  </form>
-</div>
-
-<div class="meta" id="meta" style="display:none"></div>
-
-<div class="results-wrap">
-  <div class="results" id="results">
-    <div class="hint">
-      type a query and hit enter.<br>
-      filters: from:&lt;name&gt; &nbsp; in:&lt;channel&gt; &nbsp; category:&lt;name&gt; &nbsp; before:&lt;date&gt; &nbsp; after:&lt;date&gt;
+<div class="page">
+  <div class="topbar">
+    <div class="brand">ARCHIVE<span class="slash">//</span>LEAGUE SEARCH</div>
+    <div class="operator">
+      <span class="dot"></span>
+      <span id="operator-name"></span>
+      <span>|</span>
+      <a href="/logout">sign out</a>
     </div>
   </div>
-</div>
 
-<div class="footer">
-  <span>local instance &middot; not indexed by search engines</span>
-  <span></span>
+  <div class="search-wrap">
+    <form id="search-form" class="search-bar">
+      <span class="prompt">&gt;</span>
+      <input type="text" id="query" name="query" placeholder="from:milkika in:general after:2025-09-01" autofocus>
+      <span id="spinner" class="spinner" hidden></span>
+      <span id="cursor" class="cursor"></span>
+      <button type="submit">SEARCH</button>
+    </form>
+    <button id="download-btn" class="download-btn" disabled>&darr; TXT</button>
+  </div>
+
+  <div class="stats" id="stats" style="display:none">
+    <div class="stat-cell"><div class="stat-label">MATCHES</div><div class="stat-value accent" id="stat-count"></div></div>
+    <div class="stat-cell"><div class="stat-label">SPAN</div><div class="stat-value" id="stat-span"></div></div>
+    <div class="stat-cell"><div class="stat-label">FREQUENCY</div><div class="stat-value" id="stat-freq"></div></div>
+    <div class="stat-cell stat-words"><div class="stat-label">TOP WORDS</div><div class="stat-value" id="stat-words"></div></div>
+  </div>
+
+  <div class="results-wrap">
+    <div class="results" id="results">
+      <div class="hint">
+        type a query and hit enter.<br>
+        filters: from:&lt;name&gt; &nbsp; in:&lt;channel&gt; &nbsp; category:&lt;name&gt; &nbsp; before:&lt;date&gt; &nbsp; after:&lt;date&gt;
+      </div>
+    </div>
+  </div>
+
+  <div class="footer">
+    <span>local instance &middot; not indexed by search engines</span>
+    <span id="typewriter" class="typewriter"></span>
+  </div>
 </div>
 
 <script src="/static/app.js"></script>

@@ -4,11 +4,12 @@ route that can return archived content requires a session -- enforced
 once, in before_request, not per-route."""
 from pathlib import Path
 
-from flask import Flask, jsonify, redirect, request, send_from_directory, session
+from flask import Flask, Response, jsonify, redirect, request, send_from_directory, session
 
 from archiver.credentials import load_secret_key, verify_login
 from archiver.db import connect_catalog
-from archiver.search import search
+from archiver.export import render_markdown, render_text
+from archiver.search import query_stats, search
 
 STATIC_DIR = Path(__file__).parent / "static"
 
@@ -91,7 +92,30 @@ def create_app(config, credentials_path: Path | None = None) -> Flask:
                     "author": author["username"] if author else row["author_id"],
                     "content": row["content"],
                 })
-            return jsonify({"results": results, "count": len(results)})
+            return jsonify({"results": results, "count": len(results), "stats": query_stats(rows)})
+        finally:
+            catalog_conn.close()
+
+    @app.get("/api/export")
+    def api_export():
+        raw_query = request.args.get("query", "")
+        fmt = request.args.get("format", "txt")
+        if fmt not in ("txt", "md"):
+            return jsonify({"error": f"unsupported format: {fmt}"}), 400
+
+        catalog_conn = connect_catalog(config.data_dir / "catalog.sqlite")
+        try:
+            try:
+                rows = search(catalog_conn, config.data_dir, raw_query, limit=10**9)
+            except ValueError as e:
+                return jsonify({"error": str(e)}), 400
+
+            text = render_markdown(catalog_conn, rows) if fmt == "md" else render_text(catalog_conn, rows)
+            mimetype = "text/markdown" if fmt == "md" else "text/plain"
+            return Response(
+                text, mimetype=mimetype,
+                headers={"Content-Disposition": f"attachment; filename=archive-export.{fmt}"},
+            )
         finally:
             catalog_conn.close()
 

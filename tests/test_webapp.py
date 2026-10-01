@@ -104,6 +104,47 @@ def test_api_search_with_session_returns_expected_shape(app_and_creds, tmp_path)
     assert data["results"][0]["content"] == "pizza tonight"
     assert data["results"][0]["channel"] == "general"
     assert data["results"][0]["author"] == "milkika"
+    assert data["stats"]["count"] == 1
+    assert "pizza" in dict(data["stats"]["top_words"])
+
+
+def test_api_export_without_session_returns_401(app_and_creds):
+    app, _ = app_and_creds
+    client = app.test_client()
+    resp = client.get("/api/export?query=pizza&format=txt")
+    assert resp.status_code == 401
+
+
+def test_api_export_txt_returns_a_download_with_real_content(app_and_creds, tmp_path):
+    app, _ = app_and_creds
+    _seed_one_message(tmp_path, content="pizza tonight")
+    client = app.test_client()
+    with client.session_transaction() as sess:
+        sess["codename"] = "shoe"
+    resp = client.get("/api/export?query=pizza&format=txt")
+    assert resp.status_code == 200
+    assert "attachment" in resp.headers["Content-Disposition"]
+    assert "pizza tonight" in resp.get_data(as_text=True)
+
+
+def test_api_export_md_format_returns_markdown_content_type(app_and_creds, tmp_path):
+    app, _ = app_and_creds
+    _seed_one_message(tmp_path, content="pizza tonight")
+    client = app.test_client()
+    with client.session_transaction() as sess:
+        sess["codename"] = "shoe"
+    resp = client.get("/api/export?query=pizza&format=md")
+    assert resp.status_code == 200
+    assert "markdown" in resp.headers["Content-Type"]
+
+
+def test_api_export_unsupported_format_returns_400(app_and_creds):
+    app, _ = app_and_creds
+    client = app.test_client()
+    with client.session_transaction() as sess:
+        sess["codename"] = "shoe"
+    resp = client.get("/api/export?query=pizza&format=json")
+    assert resp.status_code == 400
 
 
 def test_api_search_malformed_query_returns_400_not_a_crash(app_and_creds):
