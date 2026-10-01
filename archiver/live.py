@@ -42,7 +42,13 @@ def apply_live_message(store: ShardStore, catalog_conn: sqlite3.Connection, mess
 
     The shard write and the catalog checkpoint write are separate
     try/except blocks, each rolling back only its own connection, so a
-    failure in one can't leave the other holding a dangling transaction."""
+    failure in one can't leave the other holding a dangling transaction.
+    message_count only increments when write_message reports the
+    message was genuinely new to this shard -- independent of whether
+    the checkpoint advances, since a message can be new-to-the-archive
+    on a channel that hasn't finished catch-up, or already-archived
+    (e.g. a duplicate delivery, or backfill already wrote it) on a
+    channel that has."""
     channel_id = str(message.channel.id)
     if not _is_tracked_channel(catalog_conn, channel_id):
         return
@@ -51,7 +57,7 @@ def apply_live_message(store: ShardStore, catalog_conn: sqlite3.Connection, mess
     mapped = map_message(message)
     shard_conn = store.get_shard(channel_id, message.created_at)
     try:
-        write_message(shard_conn, mapped)
+        is_new = write_message(shard_conn, mapped)
         shard_conn.commit()
     except BaseException:
         shard_conn.rollback()
@@ -60,10 +66,15 @@ def apply_live_message(store: ShardStore, catalog_conn: sqlite3.Connection, mess
     try:
         if advance_checkpoint:
             catalog_conn.execute(
-                "UPDATE coverage SET live_checkpoint=?, message_count=message_count+1 "
+                "UPDATE coverage SET live_checkpoint=? "
                 "WHERE channel_id=? AND (live_checkpoint IS NULL "
                 "OR CAST(? AS INTEGER) > CAST(live_checkpoint AS INTEGER))",
                 (message_id, channel_id, message_id),
+            )
+        if is_new:
+            catalog_conn.execute(
+                "UPDATE coverage SET message_count=message_count+1 WHERE channel_id=?",
+                (channel_id,),
             )
         catalog_conn.commit()
     except BaseException:

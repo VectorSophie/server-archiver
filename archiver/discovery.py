@@ -63,6 +63,8 @@ async def discover_guild(guild, catalog_conn: sqlite3.Connection) -> dict:
                 _set_gap_reason(catalog_conn, t["id"], gap_reason)
             _set_gap_reason(catalog_conn, str(channel.id), gap_reason)
 
+        catalog_conn.commit()  # commit this channel's discovery work before the next await
+
     channel_by_id = {c.id: c for c in top_level}
     for thread in await guild.active_threads():
         seen_ids.add(str(thread.id))

@@ -75,7 +75,10 @@ def test_apply_live_message_checkpoint_compares_as_integer_not_text(tmp_path):
 def test_apply_live_message_writes_but_skips_checkpoint_when_advance_checkpoint_false(tmp_path):
     """Finding #1: a channel still mid-catch-up must have its message
     written (so nothing is lost) without the checkpoint jumping past
-    the still-unfinished gap."""
+    the still-unfinished gap. message_count still increments -- the
+    message is genuinely new to the archive even though the channel
+    hasn't finished catch-up; checkpoint-advance and new-message
+    counting are independent facts (see apply_live_message)."""
     catalog = connect_catalog(tmp_path / "catalog.sqlite")
     _seed_channel(catalog)
     store = ShardStore(tmp_path, catalog)
@@ -87,7 +90,7 @@ def test_apply_live_message_writes_but_skips_checkpoint_when_advance_checkpoint_
         "SELECT live_checkpoint, message_count FROM coverage WHERE channel_id='1'"
     ).fetchone()
     assert row["live_checkpoint"] is None
-    assert row["message_count"] == 0
+    assert row["message_count"] == 1
     shard = store.get_shard("1", CREATED)
     assert shard.execute("SELECT content FROM messages WHERE id='100'").fetchone()["content"] == "hi"
 
@@ -101,6 +104,51 @@ def test_apply_live_message_ignores_untracked_channel(tmp_path):
 
     row = catalog.execute("SELECT 1 FROM coverage WHERE channel_id='999'").fetchone()
     assert row is None
+
+
+def test_apply_live_message_does_not_double_count_a_replayed_message(tmp_path):
+    catalog = connect_catalog(tmp_path / "catalog.sqlite")
+    _seed_channel(catalog)
+    store = ShardStore(tmp_path, catalog)
+    msg = FakeMessage(id=100, channel_id=1, author_id=2, content="hello", created_at=CREATED)
+
+    apply_live_message(store, catalog, msg)  # first delivery
+    apply_live_message(store, catalog, msg)  # duplicate delivery of the same id (e.g. rescan)
+
+    row = catalog.execute("SELECT message_count FROM coverage WHERE channel_id='1'").fetchone()
+    assert row["message_count"] == 1
+
+
+def test_apply_live_message_does_not_count_a_message_backfill_already_archived(tmp_path):
+    """The previous test (same id delivered twice via apply_live_message)
+    doesn't actually discriminate correct from buggy code, since the
+    live_checkpoint WHERE clause alone already blocks a same-id replay
+    even under the old, coupled counting logic. This test seeds the
+    shard directly (simulating a prior backfill write) with the
+    catalog's message_count/live_checkpoint still untouched, then
+    delivers the same id live -- this is the scenario the bug fix
+    actually targets: a message already archived by a different
+    operation must not be double-counted when live capture also
+    touches it."""
+    from archiver.discord_message import map_message
+    from archiver.store import write_message
+
+    catalog = connect_catalog(tmp_path / "catalog.sqlite")
+    _seed_channel(catalog)
+    store = ShardStore(tmp_path, catalog)
+    msg = FakeMessage(id=100, channel_id=1, author_id=2, content="hello", created_at=CREATED)
+
+    shard_conn = store.get_shard("1", CREATED)
+    write_message(shard_conn, map_message(msg))
+    shard_conn.commit()
+
+    apply_live_message(store, catalog, msg)  # live delivery of the already-archived id
+
+    row = catalog.execute(
+        "SELECT message_count, live_checkpoint FROM coverage WHERE channel_id='1'"
+    ).fetchone()
+    assert row["message_count"] == 0  # not double-counted
+    assert row["live_checkpoint"] == "100"  # checkpoint still advances correctly
 
 
 from archiver.discord_message import map_message

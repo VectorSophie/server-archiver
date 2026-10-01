@@ -104,11 +104,21 @@ class ShardStore:
         self._shards.clear()
 
 
-def write_message(shard_conn: sqlite3.Connection, mapped: dict) -> None:
+def write_message(shard_conn: sqlite3.Connection, mapped: dict) -> bool:
     """Idempotent upsert of one mapped message and all its child rows.
     Safe to call twice with the same data (replay after a crash). Does
-    not commit -- callers batch a page's writes under one commit."""
+    not commit -- callers batch a page's writes under one commit.
+    Returns True if this call inserted a brand-new message row, False
+    if the id already existed (an edit, a replay, or the same message
+    arriving via two different code paths -- e.g. live capture and a
+    backfill sweep touching the same id) -- callers use this to count
+    coverage.message_count accurately instead of once per write
+    attempt."""
     m = mapped["message"]
+    is_new = shard_conn.execute(
+        "SELECT 1 FROM messages WHERE id=?", (m["id"],)
+    ).fetchone() is None
+
     shard_conn.execute(
         "INSERT INTO messages (id, channel_id, author_id, content, created_utc, "
         "edited_utc, reply_to_id, mention_everyone, flags, deleted_utc) "
@@ -191,6 +201,8 @@ def write_message(shard_conn: sqlite3.Connection, mapped: dict) -> None:
             ef,
         )
 
+    return is_new
+
 
 def commit_page(store: ShardStore, catalog_conn: sqlite3.Connection, channel_id: str,
                  pages: list, oldest_id: str, newest_id: str) -> None:
@@ -209,9 +221,11 @@ def commit_page(store: ShardStore, catalog_conn: sqlite3.Connection, channel_id:
     `pages` is a list of (discord_message, mapped_dict) tuples."""
     touched_shards: set[sqlite3.Connection] = set()
     try:
+        new_count = 0
         for message, mapped in pages:
             shard_conn = store.get_shard(channel_id, message.created_at)
-            write_message(shard_conn, mapped)
+            if write_message(shard_conn, mapped):
+                new_count += 1
             touched_shards.add(shard_conn)
 
         for shard_conn in touched_shards:
@@ -221,7 +235,7 @@ def commit_page(store: ShardStore, catalog_conn: sqlite3.Connection, channel_id:
             "UPDATE coverage SET backfill_checkpoint=?, "
             "oldest_message_id=COALESCE(oldest_message_id, ?), newest_message_id=?, "
             "message_count=message_count+? WHERE channel_id=?",
-            (newest_id, oldest_id, newest_id, len(pages), channel_id),
+            (newest_id, oldest_id, newest_id, new_count, channel_id),
         )
         if cursor.rowcount != 1:
             raise RuntimeError(f"commit_page: no coverage row for channel_id={channel_id}")

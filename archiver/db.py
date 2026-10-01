@@ -92,7 +92,20 @@ CREATE TABLE IF NOT EXISTS snapshots (
 );
 """
 
-CATALOG_MIGRATIONS: list[tuple[int, str]] = [(1, CATALOG_SCHEMA_V1)]
+CATALOG_SCHEMA_V2 = """
+CREATE TABLE IF NOT EXISTS report_fingerprint (
+    scope TEXT PRIMARY KEY,
+    fingerprint TEXT NOT NULL,
+    generated_utc TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS report_last_coverage (
+    channel_id TEXT PRIMARY KEY,
+    status TEXT NOT NULL
+);
+"""
+
+CATALOG_MIGRATIONS: list[tuple[int, str]] = [(1, CATALOG_SCHEMA_V1), (2, CATALOG_SCHEMA_V2)]
 
 
 def connect_catalog(path: Path) -> sqlite3.Connection:

@@ -20,6 +20,11 @@ from archiver.db import connect_catalog
 from archiver.discovery import discover_guild
 from archiver.discord_io import load_token
 from archiver.live import apply_live_message, apply_raw_delete, apply_raw_edit, catch_up_missed_messages, rescan_recent_window
+from archiver.report_state import (
+    compute_scope_fingerprint, diff_newly_inaccessible, is_scope_dirty, mark_scope_generated,
+    save_coverage_snapshot,
+)
+from archiver.reports import channels_by_scope, gather_coverage, gather_scope_stats, render_report
 from archiver.search import format_result, get_context, search
 from archiver.store import ShardStore
 
@@ -314,6 +319,59 @@ def _run_find_interactive(config) -> int:
         _run_find(config, raw)
 
 
+def _run_report(config, *, force: bool = False) -> int:
+    catalog_conn = connect_catalog(config.data_dir / "catalog.sqlite")
+    try:
+        coverage = gather_coverage(catalog_conn)
+        coverage_by_channel = {row["channel_id"]: row for row in coverage}
+        scopes = channels_by_scope(catalog_conn)
+        newly_inaccessible = diff_newly_inaccessible(catalog_conn, coverage)
+
+        reports_dir = config.data_dir / "reports"
+        reports_dir.mkdir(parents=True, exist_ok=True)
+        excluded = frozenset(config.excluded_ranking_author_ids)
+
+        generated, skipped = [], []
+        for scope, channel_ids in scopes.items():
+            current_fingerprint = compute_scope_fingerprint(catalog_conn, config.data_dir, channel_ids)
+            if not force and not is_scope_dirty(catalog_conn, scope, current_fingerprint):
+                skipped.append(scope)
+                continue
+
+            scope_rows = [coverage_by_channel[cid] for cid in channel_ids if cid in coverage_by_channel]
+            stats = gather_scope_stats(catalog_conn, config.data_dir, channel_ids,
+                                        excluded_author_ids=excluded)
+            scope_newly_inaccessible = [r for r in newly_inaccessible if r["channel_id"] in channel_ids]
+
+            if scope == "server":
+                label, filename = "Server", "server.md"
+            else:
+                category_id = scope.split(":", 1)[1]
+                label = next(
+                    (r["category_name"] for r in scope_rows if r.get("category_name")),
+                    "Uncategorized" if category_id == "uncategorized" else category_id,
+                )
+                safe_name = "".join(c if c.isalnum() or c in "-_ " else "_" for c in label).strip() or category_id
+                filename = f"{safe_name}-{category_id[-6:]}.md"
+
+            text = render_report(label, scope_rows, stats, scope_newly_inaccessible)
+            (reports_dir / filename).write_text(text, encoding="utf-8")
+            mark_scope_generated(catalog_conn, scope, current_fingerprint)
+            generated.append(filename)
+
+        save_coverage_snapshot(catalog_conn, coverage)
+
+        if generated:
+            print(f"Generated: {', '.join(generated)}")
+        if skipped:
+            print(f"Skipped (unchanged): {len(skipped)} scope(s)")
+        if not generated and not skipped:
+            print("No channels discovered yet -- nothing to report.")
+        return 0
+    finally:
+        catalog_conn.close()
+
+
 def main() -> int:
     sys.stdout.reconfigure(encoding="utf-8")
     parser = argparse.ArgumentParser(prog="archive")
@@ -328,6 +386,8 @@ def main() -> int:
     find_parser.add_argument("--context", type=int, default=0)
     find_parser.add_argument("--json", action="store_true", dest="json_output")
     subparsers.add_parser("live")
+    report_parser = subparsers.add_parser("report")
+    report_parser.add_argument("--force", action="store_true")
 
     args = parser.parse_args()
 
@@ -350,6 +410,8 @@ def main() -> int:
                          json_output=args.json_output)
     if args.command == "live":
         return asyncio.run(_run_live(config))
+    if args.command == "report":
+        return _run_report(config, force=args.force)
     parser.error(f"unknown command: {args.command}")
     return 2
 

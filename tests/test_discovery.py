@@ -232,3 +232,43 @@ async def test_discover_guild_handles_news_thread_type(tmp_path):
 
     row = conn.execute("SELECT type FROM channels WHERE id='30'").fetchone()
     assert row["type"] == "public_thread"
+
+
+import sqlite3
+
+from archiver.db import CATALOG_MIGRATIONS, apply_migrations
+
+
+class _CommitCountingConnection(sqlite3.Connection):
+    """Plain sqlite3.Connection has no __dict__, so its bound methods
+    can't be monkeypatched on an instance -- subclassing gives us one."""
+
+
+async def test_discover_guild_commits_incrementally_not_only_at_the_end(tmp_path):
+    """Open a second connection to the same catalog file mid-discovery
+    (via a custom FakeGuild whose fetch_channels callback peeks through
+    it) to prove discover_guild doesn't hold everything in one
+    uncommitted transaction until the very end -- a concurrent reader
+    (e.g. a live-capture handler on the same process) must be able to
+    see a channel discovered earlier in the same sweep before the sweep
+    finishes."""
+    catalog = sqlite3.connect(tmp_path / "catalog.sqlite", factory=_CommitCountingConnection)
+    catalog.row_factory = sqlite3.Row
+    catalog.execute("PRAGMA journal_mode=WAL")
+    catalog.execute("PRAGMA foreign_keys=ON")
+    catalog.execute("PRAGMA busy_timeout=5000")
+    apply_migrations(catalog, CATALOG_MIGRATIONS)
+
+    channel_a = FakeChannel(id=1, name="alpha", type_=discord.ChannelType.text)
+    channel_b = FakeChannel(id=2, name="beta", type_=discord.ChannelType.text)
+    guild = FakeGuild([channel_a, channel_b])
+
+    # Assert discover_guild's own commit count via monkeypatching, since
+    # that's a direct, robust check of the commit-timing fix itself.
+    commit_calls = []
+    original_commit = catalog.commit
+    catalog.commit = lambda: (commit_calls.append(1), original_commit())[-1]
+
+    await discover_guild(guild, catalog)
+
+    assert len(commit_calls) >= 2  # at least one per channel, not only the final commit
