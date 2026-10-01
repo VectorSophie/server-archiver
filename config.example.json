@@ -1,5 +1,10 @@
 {
   "guild_id": "000000000000000000",
   "data_dir": "C:/ChangeMe/server-archive",
-  "excluded_ranking_author_ids": []
+  "excluded_ranking_author_ids": [],
+  "secure_cookies": false,
+  "sync_remote_host": "",
+  "sync_remote_user": "",
+  "sync_remote_data_dir": "",
+  "sync_ssh_key_path": ""
 }

@@ -33,6 +33,7 @@ from archiver.reports import channels_by_scope, gather_coverage, gather_scope_st
 from archiver.search import HAS_VALUES, format_result, get_context, search, tokenize_query
 from archiver.snapshot import create_snapshot, is_snapshot_stale, list_snapshot_scopes, restore_snapshot, verify_snapshot
 from archiver.store import ShardStore
+from archiver.sync import SYNC_STATE_FILENAME, changed_files, load_sync_state, save_sync_state, sync_to_remote
 
 HERE = Path(__file__).parent.parent
 
@@ -592,6 +593,42 @@ def _run_restore(config, category: str, yyyymm: str, *, target: str | None = Non
         catalog_conn.close()
 
 
+def _run_sync(config) -> int:
+    missing = [k for k, v in (
+        ("sync_remote_host", config.sync_remote_host),
+        ("sync_remote_user", config.sync_remote_user),
+        ("sync_remote_data_dir", config.sync_remote_data_dir),
+        ("sync_ssh_key_path", config.sync_ssh_key_path),
+    ) if not v]
+    if missing:
+        print(f"sync not configured -- missing config.json key(s): {', '.join(missing)}")
+        return 1
+
+    state_path = config.data_dir / SYNC_STATE_FILENAME
+    previous_state = load_sync_state(state_path)
+    relpaths = changed_files(config.data_dir, previous_state)
+    if not relpaths:
+        print("Nothing changed since last sync.")
+        return 0
+
+    sync_to_remote(
+        config.data_dir, relpaths,
+        ssh_key=Path(config.sync_ssh_key_path),
+        remote_user=config.sync_remote_user,
+        remote_host=config.sync_remote_host,
+        remote_data_dir=config.sync_remote_data_dir,
+    )
+
+    new_state = dict(previous_state)
+    for rel in relpaths:
+        st = (config.data_dir / rel).stat()
+        new_state[rel] = [st.st_mtime_ns, st.st_size]
+    save_sync_state(state_path, new_state)
+
+    print(f"Synced {len(relpaths)} file(s).")
+    return 0
+
+
 def _run_serve(config, *, host: str = "127.0.0.1", port: int = 8000) -> int:
     from archiver.webapp import create_app
     app = create_app(config)
@@ -675,6 +712,7 @@ def main() -> int:
     serve_parser.add_argument("--port", type=int, default=8000)
     useradd_parser = subparsers.add_parser("useradd", help="Add or reset a league member's web login")
     useradd_parser.add_argument("codename")
+    subparsers.add_parser("sync", help="Push changed archive data to the deployed remote mirror")
 
     args = parser.parse_args()
 
@@ -719,6 +757,8 @@ def main() -> int:
         return _run_serve(config, host=args.host, port=args.port)
     if args.command == "useradd":
         return _run_useradd(config, args.codename)
+    if args.command == "sync":
+        return _run_sync(config)
     parser.error(f"unknown command: {args.command}")
     return 2
 

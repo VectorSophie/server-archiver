@@ -14,6 +14,10 @@ class Config:
     data_dir: Path
     excluded_ranking_author_ids: tuple[str, ...] = ()
     secure_cookies: bool = True
+    sync_remote_host: str | None = None
+    sync_remote_user: str | None = None
+    sync_remote_data_dir: str | None = None
+    sync_ssh_key_path: str | None = None
 
 
 def load_config(path: Path) -> Config:
@@ -26,4 +30,8 @@ def load_config(path: Path) -> Config:
         data_dir=Path(raw["data_dir"]),
         excluded_ranking_author_ids=tuple(str(x) for x in raw.get("excluded_ranking_author_ids", [])),
         secure_cookies=bool(raw.get("secure_cookies", True)),
+        sync_remote_host=raw.get("sync_remote_host"),
+        sync_remote_user=raw.get("sync_remote_user"),
+        sync_remote_data_dir=raw.get("sync_remote_data_dir"),
+        sync_ssh_key_path=raw.get("sync_ssh_key_path"),
     )

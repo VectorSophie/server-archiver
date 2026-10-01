@@ -225,3 +225,36 @@ def test_acquire_single_instance_lock_blocks_a_second_caller(tmp_path):
     third = _acquire_single_instance_lock(tmp_path)
     assert third is not None
     third.close()
+
+
+def test_run_sync_without_config_reports_missing_keys_not_crash(tmp_path):
+    from archiver.cli import _run_sync
+    from archiver.config import Config
+
+    config = Config(guild_id="1", data_dir=tmp_path)
+    assert _run_sync(config) == 1
+
+
+def test_run_sync_pushes_changed_files_and_updates_state(tmp_path, monkeypatch):
+    from archiver.cli import _run_sync
+    from archiver.config import Config
+    import archiver.cli as cli_module
+
+    (tmp_path / "catalog.sqlite").write_text("a")
+
+    calls = []
+    monkeypatch.setattr(cli_module, "sync_to_remote", lambda *a, **kw: calls.append((a, kw)))
+
+    config = Config(
+        guild_id="1", data_dir=tmp_path,
+        sync_remote_host="1.2.3.4", sync_remote_user="ubuntu",
+        sync_remote_data_dir="/opt/data", sync_ssh_key_path="C:/key",
+    )
+    assert _run_sync(config) == 0
+    assert len(calls) == 1
+    assert calls[0][0][1] == ["catalog.sqlite"]
+
+    # Second run with nothing changed syncs nothing.
+    calls.clear()
+    assert _run_sync(config) == 0
+    assert calls == []
